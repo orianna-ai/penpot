@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 
-if [ "$NODE_ENV" = "production" ];  then
-    export _BUILD_MODE="release";
-else
-    export _BUILD_MODE=${1:-debug};
-fi
+# if [ "$NODE_ENV" = "production" ];  then
+#     export _BUILD_MODE="release";
+# else
+#     export _BUILD_MODE=${1:-debug};
+# fi
+export _BUILD_MODE=${1:-debug};
 
 EMCC_CFLAGS="--no-entry \
     -sASSERTIONS=1 \

@@ -44,6 +44,7 @@
    [app.main.data.helpers :as dsh]
    [app.main.data.modal :as modal]
    [app.main.data.notifications :as ntf]
+   [app.main.data.persistence :as-alias dps]
    [app.main.data.plugins :as dp]
    [app.main.data.profile :as du]
    [app.main.data.project :as dpj]
@@ -253,7 +254,6 @@
     (watch [_ state _]
       (let [team-id    (:current-team-id state)
             file-id    (:id file)]
-
         (rx/of (dwn/initialize team-id file-id)
                (dwsl/initialize-shape-layout)
                (fetch-libraries file-id))))))
@@ -354,6 +354,11 @@
                                 (rx/of (dpj/initialize-project (:project-id file))
                                        (-> (workspace-initialized file-id)
                                            (with-meta {:file-id file-id}))))))
+
+              (->> stream
+                   (rx/filter (ptk/type? ::dps/persistence-notification))
+                   (rx/take 1)
+                   (rx/map dwc/set-workspace-visited))
 
               (when-let [component-id (some-> rparams :component-id parse-uuid)]
                 (->> stream
@@ -477,10 +482,13 @@
     ptk/WatchEvent
     (watch [_ state _]
       (if-let [page (dsh/lookup-page state file-id page-id)]
-        (rx/of (initialize-page* file-id page-id page)
-               (dwth/watch-state-changes file-id page-id)
-               (dwl/watch-component-changes)
-               (select-frame-tool file-id page-id))
+        (rx/concat (rx/of (initialize-page* file-id page-id page)
+                          (dwth/watch-state-changes file-id page-id)
+                          (dwl/watch-component-changes))
+                   (let [profile (:profile state)
+                         props   (get profile :props)]
+                     (when (not (:workspace-visited props))
+                       (rx/of (select-frame-tool file-id page-id)))))
         (rx/of (dcm/go-to-workspace :file-id file-id ::rt/replace true))))))
 
 (defn finalize-page

@@ -212,7 +212,7 @@
    [:interactions {:optional true}
     [:vector {:gen/max 2} ::ctsi/interaction]]
    [:shadow {:optional true}
-    [:vector {:gen/max 1} ::ctss/shadow]]
+    [:vector {:gen/max 1} ctss/schema:shadow]]
    [:blur {:optional true} ::ctsb/blur]
    [:grow-type {:optional true}
     [::sm/one-of grow-types]]
@@ -234,7 +234,7 @@
   [:map {:title "BoolAttrs"}
    [:shapes [:vector {:gen/max 10 :gen/min 1} ::sm/uuid]]
    [:bool-type [::sm/one-of bool-types]]
-   [:bool-content ::ctsp/content]])
+   [:content ::ctsp/content]])
 
 (def ^:private schema:rect-attrs
   [:map {:title "RectAttrs"}])

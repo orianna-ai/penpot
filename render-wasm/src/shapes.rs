@@ -1,9 +1,8 @@
 use skia_safe::{self as skia};
 
-use std::collections::HashMap;
-use uuid::Uuid;
-
 use crate::render::BlendMode;
+use crate::uuid::Uuid;
+use std::collections::{HashMap, HashSet};
 
 mod blurs;
 mod bools;
@@ -41,6 +40,10 @@ pub use transform::*;
 
 use crate::math;
 use crate::math::{Bounds, Matrix, Point};
+use indexmap::IndexSet;
+
+const MIN_VISIBLE_SIZE: f32 = 2.0;
+const ANTIALIAS_THRESHOLD: f32 = 15.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
@@ -157,7 +160,7 @@ pub struct Shape {
     pub id: Uuid,
     pub parent_id: Option<Uuid>,
     pub shape_type: Type,
-    pub children: Vec<Uuid>,
+    pub children: IndexSet<Uuid>,
     pub selrect: math::Rect,
     pub transform: Matrix,
     pub rotation: f32,
@@ -182,7 +185,7 @@ impl Shape {
             id,
             parent_id: None,
             shape_type: Type::Rect(Rect::default()),
-            children: Vec::<Uuid>::new(),
+            children: IndexSet::<Uuid>::new(),
             selrect: math::Rect::new_empty(),
             transform: Matrix::default(),
             rotation: 0.,
@@ -429,11 +432,16 @@ impl Shape {
     }
 
     pub fn add_child(&mut self, id: Uuid) {
-        self.children.push(id);
+        self.children.insert(id);
     }
 
-    pub fn clear_children(&mut self) {
-        self.children.clear();
+    pub fn compute_children_differences(
+        &mut self,
+        children: &IndexSet<Uuid>,
+    ) -> (IndexSet<Uuid>, IndexSet<Uuid>) {
+        let added = children.difference(&self.children).cloned().collect();
+        let removed = self.children.difference(children).cloned().collect();
+        (added, removed)
     }
 
     pub fn fills(&self) -> std::slice::Iter<Fill> {
@@ -448,21 +456,6 @@ impl Shape {
         self.fills.clear();
     }
 
-    pub fn add_fill_gradient_stops(&mut self, buffer: Vec<RawStopData>) -> Result<(), String> {
-        let fill = self.fills.last_mut().ok_or("Shape has no fills")?;
-        let gradient = match fill {
-            Fill::LinearGradient(g) => Ok(g),
-            Fill::RadialGradient(g) => Ok(g),
-            _ => Err("Active fill is not a gradient"),
-        }?;
-
-        for stop in buffer.into_iter() {
-            gradient.add_stop(stop.color(), stop.offset());
-        }
-
-        Ok(())
-    }
-
     pub fn strokes(&self) -> std::slice::Iter<Stroke> {
         self.strokes.iter()
     }
@@ -474,22 +467,6 @@ impl Shape {
     pub fn set_stroke_fill(&mut self, f: Fill) -> Result<(), String> {
         let stroke = self.strokes.last_mut().ok_or("Shape has no strokes")?;
         stroke.fill = f;
-        Ok(())
-    }
-
-    pub fn add_stroke_gradient_stops(&mut self, buffer: Vec<RawStopData>) -> Result<(), String> {
-        let stroke = self.strokes.last_mut().ok_or("Shape has no strokes")?;
-        let fill = &mut stroke.fill;
-        let gradient = match fill {
-            Fill::LinearGradient(g) => Ok(g),
-            Fill::RadialGradient(g) => Ok(g),
-            _ => Err("Active stroke is not a gradient"),
-        }?;
-
-        for stop in buffer.into_iter() {
-            gradient.add_stop(stop.color(), stop.offset());
-        }
-
         Ok(())
     }
 
@@ -572,6 +549,21 @@ impl Shape {
         self.hidden
     }
 
+    #[allow(dead_code)]
+    pub fn width(&self) -> f32 {
+        self.selrect.width()
+    }
+
+    pub fn visually_insignificant(&self, scale: f32) -> bool {
+        self.selrect.width() * scale < MIN_VISIBLE_SIZE
+            || self.selrect.height() * scale < MIN_VISIBLE_SIZE
+    }
+
+    pub fn should_use_antialias(&self, scale: f32) -> bool {
+        self.selrect.width() * scale > ANTIALIAS_THRESHOLD
+            || self.selrect.height() * scale > ANTIALIAS_THRESHOLD
+    }
+
     // TODO: Maybe store this inside the shape
     pub fn bounds(&self) -> Bounds {
         let mut bounds = Bounds::new(
@@ -637,17 +629,17 @@ impl Shape {
         self.children.first()
     }
 
-    pub fn children_ids(&self) -> Vec<Uuid> {
+    pub fn children_ids(&self) -> IndexSet<Uuid> {
         if let Type::Bool(_) = self.shape_type {
-            vec![]
+            IndexSet::<Uuid>::new()
         } else if let Type::Group(group) = self.shape_type {
             if group.masked {
-                self.children[1..self.children.len()].to_vec()
+                self.children.iter().skip(1).cloned().collect()
             } else {
-                self.children.clone()
+                self.children.clone().into_iter().collect()
             }
         } else {
-            self.children.clone()
+            self.children.clone().into_iter().collect()
         }
     }
 
@@ -708,25 +700,10 @@ impl Shape {
         }
     }
 
-    pub fn add_text_leaf(
-        &mut self,
-        text_str: String,
-        font_family: FontFamily,
-        font_size: f32,
-    ) -> Result<(), String> {
+    pub fn add_paragraph(&mut self, paragraph: Paragraph) -> Result<(), String> {
         match self.shape_type {
             Type::Text(ref mut text) => {
-                text.add_leaf(text_str, font_family, font_size)?;
-                Ok(())
-            }
-            _ => Err("Shape is not a text".to_string()),
-        }
-    }
-
-    pub fn add_text_paragraph(&mut self) -> Result<(), String> {
-        match self.shape_type {
-            Type::Text(ref mut text) => {
-                text.add_paragraph();
+                text.add_paragraph(paragraph);
                 Ok(())
             }
             _ => Err("Shape is not a text".to_string()),
@@ -833,6 +810,40 @@ impl Shape {
 
     pub fn has_fills(&self) -> bool {
         !self.fills.is_empty()
+    }
+}
+
+/*
+  Returns the list of children taking into account the structure modifiers
+*/
+pub fn modified_children_ids(
+    element: &Shape,
+    structure: Option<&Vec<StructureEntry>>,
+) -> IndexSet<Uuid> {
+    if let Some(structure) = structure {
+        let mut result: Vec<Uuid> = Vec::from_iter(element.children_ids().iter().map(|id| *id));
+        let mut to_remove = HashSet::<&Uuid>::new();
+
+        for st in structure {
+            match st.entry_type {
+                StructureEntryType::AddChild => {
+                    result.insert(st.index as usize, st.id);
+                }
+                StructureEntryType::RemoveChild => {
+                    to_remove.insert(&st.id);
+                }
+            }
+        }
+
+        let ret: IndexSet<Uuid> = result
+            .iter()
+            .filter(|id| !to_remove.contains(id))
+            .map(|id| *id)
+            .collect();
+
+        ret
+    } else {
+        element.children_ids()
     }
 }
 

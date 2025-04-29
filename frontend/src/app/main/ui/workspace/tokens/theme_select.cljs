@@ -11,7 +11,7 @@
    [app.common.types.tokens-lib :as ctob]
    [app.common.uuid :as uuid]
    [app.main.data.modal :as modal]
-   [app.main.data.tokens :as wdt]
+   [app.main.data.workspace.tokens.library-edit :as dwtl]
    [app.main.refs :as refs]
    [app.main.store :as st]
    [app.main.ui.components.dropdown :refer [dropdown]]
@@ -31,7 +31,7 @@
                  selected? (get active-theme-paths theme-id)
                  select-theme (fn [e]
                                 (dom/stop-propagation e)
-                                (st/emit! (wdt/toggle-token-theme-active? group name))
+                                (st/emit! (dwtl/toggle-token-theme-active? group name))
                                 (on-close))]]
        [:li {:key theme-id
              :role "option"
@@ -41,7 +41,7 @@
                      :sub-item grouped?
                      :is-selected selected?)
              :on-click select-theme}
-        [:> text* {:as "span" :typography "body-small" :class (stl/css :label)} name]
+        [:> text* {:as "span" :typography "body-small" :class (stl/css :label) :title name} name]
         [:> icon* {:icon-id i/tick
                    :aria-hidden true
                    :class (stl/css-case :check-icon true
@@ -58,7 +58,7 @@
                :aria-labelledby (dm/str group "-label")
                :role "group"}
           (when (seq group)
-            [:> text* {:as "span" :typography "headline-small" :class (stl/css :group) :id (dm/str group "-label")} group])
+            [:> text* {:as "span" :typography "headline-small" :class (stl/css :group) :id (dm/str (str/kebab group) "-label") :title group} group])
           [:& themes-list {:themes themes
                            :active-theme-paths active-theme-paths
                            :on-close on-close

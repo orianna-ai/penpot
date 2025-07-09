@@ -11,8 +11,11 @@
    [app.common.data :as d]
    [app.common.data.macros :as dm]
    [app.common.math :as mth]
+   [app.common.types.fill :as types.fill]
+   [app.config :as cfg]
+   [app.main.features :as features]
    [app.main.ui.components.numeric-input :refer [numeric-input*]]
-   [app.main.ui.components.reorder-handler :refer [reorder-handler]]
+   [app.main.ui.components.reorder-handler :refer [reorder-handler*]]
    [app.main.ui.components.select :refer [select]]
    [app.main.ui.ds.buttons.icon-button :refer [icon-button*]]
    [app.main.ui.formats :as fmt]
@@ -136,7 +139,7 @@
                                 :dnd-over-top (= (:over dprops) :top)
                                 :dnd-over-bot (= (:over dprops) :bot))}
 
-     [:& reorder-handler {:ref dref}]
+     [:> reorder-handler* {:ref dref}]
 
      [:div {:class (stl/css :offset-input-wrapper)}
       [:span {:class (stl/css :icon-text)} "%"]
@@ -283,7 +286,9 @@
          (mf/deps on-reverse-stops)
          (fn []
            (when on-reverse-stops
-             (on-reverse-stops))))]
+             (on-reverse-stops))))
+        cap-stops? (or (features/use-feature "render-wasm/v1") (contains? cfg/flags :frontend-binary-fills))
+        add-stop-disabled? (when cap-stops? (>= (count stops) types.fill/MAX-GRADIENT-STOPS))]
 
     [:div {:class (stl/css :gradient-panel)}
      [:div {:class (stl/css :gradient-preview)}
@@ -294,9 +299,10 @@
              :on-pointer-leave handle-preview-leave
              :on-pointer-move handle-preview-move
              :on-pointer-down handle-preview-down}
-       [:div {:class (stl/css :gradient-preview-stop-preview)
-              :style {:display (if (:hover? @preview-state) "block" "none")
-                      "--preview-position" (dm/str (* 100 (:offset @preview-state)) "%")}}]]
+       (when (not add-stop-disabled?)
+         [:div {:class (stl/css :gradient-preview-stop-preview)
+                :style {:display (if (:hover? @preview-state) "block" "none")
+                        "--preview-position" (dm/str (* 100 (:offset @preview-state)) "%")}}])]
 
       [:div {:class (stl/css :gradient-preview-stop-wrapper)}
        (for [[index {:keys [color offset r g b alpha]}] (d/enumerate stops)]
@@ -339,6 +345,7 @@
                          :icon "switch"}]
        [:> icon-button* {:variant "ghost"
                          :aria-label "Add stop"
+                         :disabled add-stop-disabled?
                          :on-click handle-add-stop
                          :icon "add"}]]]
 

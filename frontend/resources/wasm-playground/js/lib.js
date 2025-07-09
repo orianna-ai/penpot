@@ -71,13 +71,94 @@ function ptr8ToPtr32(ptr8) {
   return ptr8 >>> 2;
 }
 
-function allocBytes(size) {
+export function allocBytes(size) {
   return Module._alloc_bytes(size);
 }
 
-function getHeapU32() {
+export function getHeapU32() {
   return Module.HEAPU32;
 }
+
+export function clearShapeFills() {
+  Module._clear_shape_fills();
+}
+
+export function addShapeSolidFill(argb) {
+  const ptr = allocBytes(160);
+  const heap = getHeapU32();
+  const dv = new DataView(heap.buffer);
+  dv.setUint8(ptr, 0x00, true);
+  dv.setUint32(ptr + 4, argb, true);
+  Module._add_shape_fill();
+}
+
+export function addShapeSolidStrokeFill(argb) {
+  const ptr = allocBytes(160);
+  const heap = getHeapU32();
+  const dv = new DataView(heap.buffer);
+  dv.setUint8(ptr, 0x00, true);
+  dv.setUint32(ptr + 4, argb, true);
+  Module._add_shape_stroke_fill();
+}
+
+function serializePathAttrs(svgAttrs) {
+  return Object.entries(svgAttrs).reduce((acc, [key, value]) => {
+    return acc + key + '\0' + value + '\0';
+  }, '');
+}
+
+export function draw_star(x, y, width, height) {
+  const len = 11; // 1 MOVE + 9 LINE + 1 CLOSE 
+  const ptr = allocBytes(len * 28);
+  const heap = getHeapU32();
+  const dv = new DataView(heap.buffer);
+
+  const cx = x + width / 2;
+  const cy = y + height / 2;
+  const outerRadius = Math.min(width, height) / 2;
+  const innerRadius = outerRadius * 0.4;
+
+  const star = [];
+  for (let i = 0; i < 10; i++) {
+    const angle = Math.PI / 5 * i - Math.PI / 2;
+    const r = i % 2 === 0 ? outerRadius : innerRadius;
+    const px = cx + r * Math.cos(angle);
+    const py = cy + r * Math.sin(angle);
+    star.push([px, py]);
+  }
+
+  let offset = 0;
+
+  // MOVE to first point
+  dv.setUint16(ptr + offset + 0, 1, true); // MOVE
+  dv.setFloat32(ptr + offset + 20, star[0][0], true);
+  dv.setFloat32(ptr + offset + 24, star[0][1], true);
+  offset += 28;
+
+  // LINE to remaining points
+  for (let i = 1; i < star.length; i++) {
+    dv.setUint16(ptr + offset + 0, 2, true); // LINE
+    dv.setFloat32(ptr + offset + 20, star[i][0], true);
+    dv.setFloat32(ptr + offset + 24, star[i][1], true);
+    offset += 28;
+  }
+
+  // CLOSE the path
+  dv.setUint16(ptr + offset + 0, 4, true); // CLOSE
+
+  Module._set_shape_path_content();
+
+  const str = serializePathAttrs({
+    "fill": "none",
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+  });
+  const size = str.length;
+  offset = allocBytes(size);
+  Module.stringToUTF8(str, offset, size);
+  Module._set_shape_path_attrs(3);
+}
+  
 
 export function setShapeChildren(shapeIds) {
   const offset = allocBytes(shapeIds.length * 16);
@@ -95,6 +176,23 @@ export function useShape(id) {
   Module._use_shape(...buffer);
 }
 
+export function set_parent(id) {
+  const buffer = getU32(id);
+  Module._set_parent(...buffer);
+}
+
+function debounce(fn, delay) {
+  let timeout;
+  return (...args) => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => fn(...args), delay);
+  };
+}
+
+const debouncedRender = debounce(() => {
+  Module._render(Date.now());
+}, 100);
+
 export function setupInteraction(canvas) {
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
@@ -105,7 +203,8 @@ export function setupInteraction(canvas) {
     offsetX -= (mouseX - offsetX) * (zoomFactor - 1);
     offsetY -= (mouseY - offsetY) * (zoomFactor - 1);
     Module._set_view(scale, offsetX, offsetY);
-    Module._render(Date.now());
+    Module._render_from_cache();
+    debouncedRender();
   });
 
   canvas.addEventListener("mousedown", (e) => {
@@ -123,10 +222,94 @@ export function setupInteraction(canvas) {
       lastX = e.offsetX;
       lastY = e.offsetY;
       Module._set_view(scale, offsetX, offsetY);
-      Module._render(Date.now());
+      Module._render_from_cache();
+      debouncedRender();
     }
   });
 
   canvas.addEventListener("mouseup", () => { isPanning = false; });
   canvas.addEventListener("mouseout", () => { isPanning = false; });
+}
+
+export function addTextShape(x, y, fontSize, text) {
+  const numLeaves = 1; // Single text leaf for simplicity
+  const paragraphAttrSize = 48;
+  const leafAttrSize = 56;
+  const fillSize = 160;
+  const textBuffer = new TextEncoder().encode(text);
+  const textSize = textBuffer.byteLength;
+
+  // Calculate fills
+  const fills = [
+    {
+      type: "solid",
+      color: getRandomColor(),
+      opacity: getRandomFloat(0.5, 1.0),
+    },
+  ];
+  const totalFills = fills.length;
+  const totalFillsSize = totalFills * fillSize;
+
+  // Calculate metadata and total buffer size
+  const metadataSize = paragraphAttrSize + leafAttrSize + totalFillsSize;
+  const totalSize = metadataSize + textSize;
+
+  // Allocate buffer
+  const bufferPtr = allocBytes(totalSize);
+  const heap = new Uint8Array(Module.HEAPU8.buffer, bufferPtr, totalSize);
+  const dview = new DataView(heap.buffer, bufferPtr, totalSize);
+
+  // Set number of leaves
+  dview.setUint32(0, numLeaves, true);
+
+  // Serialize paragraph attributes
+  dview.setUint8(4, 1); // text-align: left
+  dview.setUint8(5, 0); // text-direction: LTR
+  dview.setUint8(6, 0); // text-decoration: none
+  dview.setUint8(7, 0); // text-transform: none
+  dview.setFloat32(8, 1.2, true); // line-height
+  dview.setFloat32(12, 0, true); // letter-spacing
+  dview.setUint32(16, 0, true); // typography-ref-file (UUID part 1)
+  dview.setUint32(20, 0, true); // typography-ref-file (UUID part 2)
+  dview.setUint32(24, 0, true); // typography-ref-file (UUID part 3)
+  dview.setInt32(28, 0, true); // typography-ref-file (UUID part 4)
+  dview.setUint32(32, 0, true); // typography-ref-id (UUID part 1)
+  dview.setUint32(36, 0, true); // typography-ref-id (UUID part 2)
+  dview.setUint32(40, 0, true); // typography-ref-id (UUID part 3)
+  dview.setInt32(44, 0, true); // typography-ref-id (UUID part 4)
+
+  // Serialize leaf attributes
+  const leafOffset = paragraphAttrSize;
+  dview.setUint8(leafOffset, 0); // font-style: normal
+  dview.setFloat32(leafOffset + 4, fontSize, true); // font-size
+  dview.setUint32(leafOffset + 8, 400, true); // font-weight: normal
+  dview.setUint32(leafOffset + 12, 0, true); // font-id (UUID part 1)
+  dview.setUint32(leafOffset + 16, 0, true); // font-id (UUID part 2)
+  dview.setUint32(leafOffset + 20, 0, true); // font-id (UUID part 3)
+  dview.setInt32(leafOffset + 24, 0, true); // font-id (UUID part 4)
+  dview.setInt32(leafOffset + 28, 0, true); // font-family hash
+  dview.setUint32(leafOffset + 32, 0, true); // font-variant-id (UUID part 1)
+  dview.setUint32(leafOffset + 36, 0, true); // font-variant-id (UUID part 2)
+  dview.setUint32(leafOffset + 40, 0, true); // font-variant-id (UUID part 3)
+  dview.setInt32(leafOffset + 44, 0, true); // font-variant-id (UUID part 4)
+  dview.setInt32(leafOffset + 48, textSize, true); // text-length
+  dview.setInt32(leafOffset + 52, totalFills, true); // total fills count
+
+  // Serialize fills
+  let fillOffset = leafOffset + leafAttrSize;
+  fills.forEach((fill) => {
+    if (fill.type === "solid") {
+      const argb = hexToU32ARGB(fill.color, fill.opacity);
+      dview.setUint8(fillOffset, 0x00, true); // Fill type: solid
+      dview.setUint32(fillOffset + 4, argb, true);
+      fillOffset += fillSize; // Move to the next fill
+    }
+  });
+
+  // Add text content
+  const textOffset = metadataSize;
+  heap.set(textBuffer, textOffset);
+
+  // Call the WebAssembly function
+  Module._set_shape_text_content();
 }

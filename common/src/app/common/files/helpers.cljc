@@ -117,6 +117,12 @@
   ([shape]
    (d/not-empty? (:shapes shape))))
 
+(defn has-layout?
+  "Returns true if the provided shape has a layout assigned"
+  [objects id]
+  (let [shape (get objects id)]
+    (boolean (and shape (:layout shape)))))
+
 (defn group-like-shape?
   ([objects id]
    (group-like-shape? (get objects id)))
@@ -127,13 +133,41 @@
 
 ;; ---- ACCESSORS
 
-(defn get-children-ids
+(defn get-selected-type
+  "Returns the type of the shape if only one, or :multiple if more
+  than one"
+  [objects selected]
+  (if (= 1 (count selected))
+    (let [shape (get objects (first selected))]
+      (:type shape))
+    :multiple))
+
+(defn get-shape-type
+  "Returns the type of the shape, or 'root' if it's Root Frame, always
+  as string"
   [objects id]
-  (letfn [(get-children-ids-rec [id processed]
-            (when (not (contains? processed id))
-              (when-let [shapes (-> (get objects id) :shapes (some-> vec))]
-                (into shapes (mapcat #(get-children-ids-rec % (conj processed id))) shapes))))]
-    (get-children-ids-rec id #{})))
+  (let [shape (get objects id)]
+    (if (root? shape)
+      :root
+      (dm/get-prop shape :type))))
+
+(defn get-children-ids
+  "Returns the ids of all the descendants of the shape identified
+  by the id. Optionally, you can pass an ignore function to indicate
+  when to ignore a descendant (and all its descendants)"
+  ([objects id]
+   (get-children-ids objects id {}))
+  ([objects id {:keys [ignore-children-fn]
+                ;;ignore-children-fn should receive a shape and return a boolean
+                :or {ignore-children-fn (constantly false)}}]
+   (letfn [(get-children-ids-rec [id processed]
+             (when-not (contains? processed id)
+               (when-let [shapes (as-> (get objects id) $
+                                   (:shapes $)
+                                   (remove ignore-children-fn $)
+                                   (some-> $ vec))]
+                 (into shapes (mapcat #(get-children-ids-rec % (conj processed id))) shapes))))]
+     (get-children-ids-rec id #{}))))
 
 (defn get-children-ids-with-self
   [objects id]
@@ -625,6 +659,9 @@
               ;; Relink paths with fill image
               (map? (:fill-image form))
               (update-in [:fill-image :id] lookup-index)
+
+              (map? (:stroke-image form))
+              (update-in [:stroke-image :id] lookup-index)
 
               ;; This covers old shapes and the new :fills.
               (uuid? (:fill-color-ref-file form))

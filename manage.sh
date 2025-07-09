@@ -7,6 +7,10 @@ export DEVENV_PNAME="penpotdev";
 export CURRENT_USER_ID=$(id -u);
 export CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD);
 
+
+# Safe directory to avoid ownership errors with Git
+git config --global --add safe.directory /home/penpot/penpot || true
+
 # Set default java options
 export JAVA_OPTS=${JAVA_OPTS:-"-Xmx1000m -Xms50m"};
 
@@ -89,6 +93,8 @@ function log-devenv {
 function run-devenv-tmux {
     if [[ ! $(docker ps -f "name=penpot-devenv-main" -q) ]]; then
         start-devenv
+        echo "Waiting for containers fully start (5s)..."
+        sleep 5;
     fi
 
     docker exec -ti penpot-devenv-main sudo -EH -u penpot PENPOT_PLUGIN_DEV=$PENPOT_PLUGIN_DEV /home/start-tmux.sh
@@ -104,6 +110,20 @@ function run-devenv-shell {
            penpot-devenv-main sudo -EH -u penpot bash;
 }
 
+function run-devenv-isolated-shell {
+    docker volume create ${DEVENV_PNAME}_user_data;
+    docker run -ti --rm \
+           --mount source=${DEVENV_PNAME}_user_data,type=volume,target=/home/penpot/ \
+           --mount source=`pwd`,type=bind,target=/home/penpot/penpot \
+           -e EXTERNAL_UID=$CURRENT_USER_ID \
+           -e BUILD_STORYBOOK=$BUILD_STORYBOOK \
+           -e BUILD_WASM=$BUILD_WASM \
+           -e SHADOWCLJS_EXTRA_PARAMS=$SHADOWCLJS_EXTRA_PARAMS \
+           -e JAVA_OPTS="$JAVA_OPTS" \
+           -w /home/penpot/penpot/$1 \
+           $DEVENV_IMGNAME:latest sudo -EH -u penpot bash
+}
+
 function build {
     echo ">> build start: $1"
     local version=$(print-current-version);
@@ -115,6 +135,7 @@ function build {
            --mount source=`pwd`,type=bind,target=/home/penpot/penpot \
            -e EXTERNAL_UID=$CURRENT_USER_ID \
            -e BUILD_STORYBOOK=$BUILD_STORYBOOK \
+           -e BUILD_WASM=$BUILD_WASM \
            -e SHADOWCLJS_EXTRA_PARAMS=$SHADOWCLJS_EXTRA_PARAMS \
            -e JAVA_OPTS="$JAVA_OPTS" \
            -w /home/penpot/penpot/$1 \
@@ -232,6 +253,7 @@ function usage {
     echo "- drop-devenv                      Remove the development oriented docker compose containers, volumes and clean images."
     echo "- run-devenv                       Attaches to the running devenv container and starts development environment"
     echo "- run-devenv-shell                 Attaches to the running devenv container and starts a bash shell."
+    echo "- isolated-shell                   Starts a bash shell in a new devenv container."
     echo "- log-devenv                       Show logs of the running devenv docker compose service."
     echo ""
     echo "- build-bundle                     Build all bundles (frontend, backend and exporter)."
@@ -279,6 +301,11 @@ case $1 in
     run-devenv-shell)
         run-devenv-shell ${@:2}
         ;;
+
+    isolated-shell)
+        run-devenv-isolated-shell ${@:2}
+        ;;
+
     stop-devenv)
         stop-devenv ${@:2}
         ;;

@@ -1,3 +1,9 @@
+;; This Source Code Form is subject to the terms of the Mozilla Public
+;; License, v. 2.0. If a copy of the MPL was not distributed with this
+;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
+;;
+;; Copyright (c) KALEIDOS INC
+
 (ns frontend-tests.tokens.helpers.state
   (:require
    [app.common.types.tokens-lib :as ctob]
@@ -24,9 +30,9 @@
     ptk/WatchEvent
     (watch [_ state _]
       (let [data (dsh/lookup-file-data state)]
-        (->> (rx/from (-> (get data :tokens-lib)
-                          (ctob/get-active-themes-set-tokens)
-                          (sd/resolve-tokens+)))
+        (->> (get data :tokens-lib)
+             (ctob/get-tokens-in-active-sets)
+             (sd/resolve-tokens)
              (rx/mapcat #(rx/of (end))))))))
 
 (defn stop-on

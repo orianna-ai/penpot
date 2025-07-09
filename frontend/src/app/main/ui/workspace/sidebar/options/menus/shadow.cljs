@@ -10,13 +10,14 @@
    [app.common.colors :as clr]
    [app.common.data :as d]
    [app.common.data.macros :as dm]
+   [app.common.types.shape.shadow :as ctss]
    [app.common.uuid :as uuid]
    [app.main.data.workspace.colors :as dc]
    [app.main.data.workspace.shapes :as dwsh]
    [app.main.data.workspace.undo :as dwu]
    [app.main.store :as st]
    [app.main.ui.components.numeric-input :refer [numeric-input*]]
-   [app.main.ui.components.reorder-handler :refer [reorder-handler]]
+   [app.main.ui.components.reorder-handler :refer [reorder-handler*]]
    [app.main.ui.components.select :refer [select]]
    [app.main.ui.components.title-bar :refer [title-bar]]
    [app.main.ui.ds.buttons.icon-button :refer [icon-button*]]
@@ -91,7 +92,10 @@
         (mf/use-fn (mf/deps index) #(on-update index :blur %))
 
         on-update-color
-        (mf/use-fn (mf/deps index) #(on-update index :color (d/without-nils %)))
+        (mf/use-fn
+         (mf/deps index on-update)
+         (fn [color]
+           (on-update index :color color)))
 
         on-detach-color
         (mf/use-fn (mf/deps index) #(on-detach-color index))
@@ -123,7 +127,7 @@
                                 :dnd-over-top (= (:over dprops) :top)
                                 :dnd-over-bot (= (:over dprops) :bot))}
      (when (some? on-reorder)
-       [:& reorder-handler {:ref dref}])
+       [:> reorder-handler* {:ref dref}])
 
      [:*
       [:div {:class (stl/css :basic-options)}
@@ -196,7 +200,8 @@
                                :on-change on-update-offset-y
                                :value (:offset-y shadow)}]]
 
-          [:> color-row* {:color (:color shadow)
+          [:> color-row* {:class (stl/css :shadow-color)
+                          :color (:color shadow)
                           :title (tr "workspace.options.shadow-options.color")
                           :disable-gradient true
                           :disable-image true
@@ -274,8 +279,13 @@
         (mf/use-fn
          (fn [index attr value]
            (let [ids (mf/ref-val ids-ref)]
-             (st/emit! (dwsh/update-shapes ids #(assoc-in % [:shadow index attr] value))))))]
-
+             (st/emit! (dwsh/update-shapes ids
+                                           (fn [shape]
+                                             (update-in shape [:shadow index]
+                                                        (fn [shadow]
+                                                          (-> shadow
+                                                              (assoc attr value)
+                                                              (ctss/check-shadow))))))))))]
     [:div {:class (stl/css :element-set)}
      [:div {:class (stl/css :element-title)}
       [:& title-bar {:collapsable  has-shadows?

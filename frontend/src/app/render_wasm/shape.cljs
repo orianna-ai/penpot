@@ -6,6 +6,8 @@
 
 (ns app.render-wasm.shape
   (:require
+   [app.common.data :as d]
+   [app.common.data.macros :as dm]
    [app.common.transit :as t]
    [app.common.types.shape :as shape]
    [app.common.types.shape.layout :as ctl]
@@ -110,7 +112,8 @@
 
 (defn set-wasm-single-attr!
   [shape k]
-  (let [v (get shape k)]
+  (let [v  (get shape k)
+        id (get shape :id)]
     (case k
       :parent-id    (api/set-parent-id v)
       :type         (api/set-shape-type v)
@@ -121,8 +124,8 @@
                       (api/set-shape-clip-content false))
       :rotation     (api/set-shape-rotation v)
       :transform    (api/set-shape-transform v)
-      :fills        (into [] (api/set-shape-fills v))
-      :strokes      (into [] (api/set-shape-strokes v))
+      :fills        (into [] (api/set-shape-fills id v))
+      :strokes      (into [] (api/set-shape-strokes id v))
       :blend-mode   (api/set-shape-blend-mode v)
       :opacity      (api/set-shape-opacity v)
       :hidden       (api/set-shape-hidden v)
@@ -131,6 +134,12 @@
       :shadow       (api/set-shape-shadows v)
       :constraints-h (api/set-constraints-h v)
       :constraints-v (api/set-constraints-v v)
+
+      (:r1 :r2 :r3 :r4)
+      (api/set-shape-corners [(dm/get-prop shape :r1)
+                              (dm/get-prop shape :r2)
+                              (dm/get-prop shape :r3)
+                              (dm/get-prop shape :r4)])
 
       :svg-attrs
       (when (= (:type shape) :path)
@@ -150,9 +159,13 @@
         (api/set-shape-svg-raw-content (api/get-static-markup shape))
 
         (= (:type shape) :text)
-        (into [] (api/set-shape-text-content v)))
+        (api/set-shape-text id v))
 
-      (:layout-item-margin
+      :grow-type
+      (api/set-shape-grow-type v)
+
+      (:layout-item-align-self
+       :layout-item-margin
        :layout-item-margin-type
        :layout-item-h-sizing
        :layout-item-v-sizing
@@ -196,12 +209,13 @@
 (defn set-wasm-multi-attrs!
   [shape properties]
   (api/use-shape (:id shape))
-  (let [pending
+  (let [result
         (->> properties
-             (mapcat #(set-wasm-single-attr! shape %)))]
+             (mapcat #(set-wasm-single-attr! shape %)))
+        pending (-> (d/index-by :key :callback result) vals)]
     (if (and pending (seq pending))
       (->> (rx/from pending)
-           (rx/mapcat identity)
+           (rx/mapcat (fn [callback] (callback)))
            (rx/reduce conj [])
            (rx/subs!
             (fn [_]
@@ -216,11 +230,12 @@
   [shape k v]
   (let [shape (assoc shape k v)]
     (api/use-shape (:id shape))
-    (let [pending (set-wasm-single-attr! shape k)]
+    (let [result (set-wasm-single-attr! shape k)
+          pending (-> (d/index-by :key :callback result) vals)]
       ;; TODO: set-wasm-attrs is called twice with every set
       (if (and pending (seq pending))
         (->> (rx/from pending)
-             (rx/mapcat identity)
+             (rx/mapcat (fn [callback] (callback)))
              (rx/reduce conj [])
              (rx/subs!
               (fn [_]

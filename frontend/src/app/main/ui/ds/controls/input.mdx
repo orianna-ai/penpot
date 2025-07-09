@@ -1,3 +1,9 @@
+{ /* This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+  Copyright (c) KALEIDOS INC */ }
+
 import { Canvas, Meta } from '@storybook/blocks';
 import * as InputStories from "./input.stories";
 
@@ -25,6 +31,31 @@ These are available in the `app.main.ds.foundations.assets.icon` namespace.
 ```clj
 [:> input* {:icon i/effects}]
 ```
+
+## Destructuring the component
+
+The `input*` component is composed of `label*`, `input-field*`, and `hint-message*` components. If you only need some of these components or require them to be broken down, you can build them as a group of components.
+
+```clj
+[:> label* {:for id :is-optional true} label]
+[:> input-field* {:id id}]
+[:> hint-message* {:id id :message message :type "warning}]
+```
+
+<Canvas of={InputStories.Composable} />
+
+#### `input-field*` slots
+
+The `input-field*` offers two slots where developers can include external components as properties.
+
+- **slot-start**: adds a component to the beginning of the input
+- **slot-end**: adds a component to the end of the input
+
+```clj
+[:> input-field* {:id id :slot-start component-one :slot-end component-two}]
+```
+
+<Canvas of={InputStories.Slots} />
 
 ## Usage guidelines (design)
 

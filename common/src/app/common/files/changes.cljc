@@ -16,7 +16,6 @@
    [app.common.schema.desc-native :as smd]
    [app.common.schema.generators :as sg]
    [app.common.types.color :as ctc]
-   [app.common.types.colors-list :as ctcl]
    [app.common.types.component :as ctk]
    [app.common.types.components-list :as ctkl]
    [app.common.types.container :as ctn]
@@ -24,6 +23,7 @@
    [app.common.types.grid :as ctg]
    [app.common.types.page :as ctp]
    [app.common.types.pages-list :as ctpl]
+   [app.common.types.path :as path]
    [app.common.types.shape :as cts]
    [app.common.types.shape-tree :as ctst]
    [app.common.types.tokens-lib :as ctob]
@@ -47,14 +47,14 @@
      [:type [:= :assign]]
      ;; NOTE: the full decoding is happening on the handler because it
      ;; needs a proper context of the current shape and its type
-     [:value [:map-of :keyword :any]]
+     [:value [:map-of :keyword ::sm/any]]
      [:ignore-touched {:optional true} :boolean]
      [:ignore-geometry {:optional true} :boolean]]]
    [:set
     [:map {:title "SetOperation"}
      [:type [:= :set]]
      [:attr :keyword]
-     [:val :any]
+     [:val ::sm/any]
      [:ignore-touched {:optional true} :boolean]
      [:ignore-geometry {:optional true} :boolean]]]
    [:set-touched
@@ -238,10 +238,10 @@
       [:component-id {:optional true} ::sm/uuid]
       [:ignore-touched {:optional true} :boolean]
       [:parent-id ::sm/uuid]
-      [:shapes :any]
+      [:shapes ::sm/any]
       [:index {:optional true} [:maybe :int]]
-      [:after-shape {:optional true} :any]
-      [:component-swap {:optional true} :boolean]]]
+      [:after-shape {:optional true} ::sm/any]
+      [:allow-altering-copies {:optional true} :boolean]]]
 
     [:reorder-children
      [:map {:title "ReorderChildrenChange"}
@@ -250,14 +250,14 @@
       [:component-id {:optional true} ::sm/uuid]
       [:ignore-touched {:optional true} :boolean]
       [:parent-id ::sm/uuid]
-      [:shapes :any]]]
+      [:shapes ::sm/any]]]
 
     [:add-page
      [:map {:title "AddPageChange"}
       [:type [:= :add-page]]
       [:id {:optional true} ::sm/uuid]
       [:name {:optional true} :string]
-      [:page {:optional true} :any]]]
+      [:page {:optional true} ::sm/any]]]
 
     [:mod-page
      [:map {:title "ModPageChange"}
@@ -265,7 +265,7 @@
       [:id ::sm/uuid]
       ;; All props are optional, background can be nil because is the
       ;; way to remove already set background
-      [:background {:optional true} [:maybe ::ctc/rgb-color]]
+      [:background {:optional true} [:maybe ctc/schema:hex-color]]
       [:name {:optional true} :string]]]
 
     [:set-plugin-data schema:set-plugin-data-change]
@@ -291,12 +291,12 @@
     [:add-color
      [:map {:title "AddColorChange"}
       [:type [:= :add-color]]
-      [:color ::ctc/color]]]
+      [:color ctc/schema:library-color]]]
 
     [:mod-color
      [:map {:title "ModColorChange"}
       [:type [:= :mod-color]]
-      [:color ::ctc/color]]]
+      [:color ctc/schema:library-color]]]
 
     [:del-color
      [:map {:title "DelColorChange"}
@@ -310,12 +310,12 @@
     [:add-media
      [:map {:title "AddMediaChange"}
       [:type [:= :add-media]]
-      [:object ::ctf/media-object]]]
+      [:object ctf/schema:media]]]
 
     [:mod-media
      [:map {:title "ModMediaChange"}
       [:type [:= :mod-media]]
-      [:object ::ctf/media-object]]]
+      [:object ctf/schema:media]]]
 
     [:del-media
      [:map {:title "DelMediaChange"}
@@ -327,14 +327,14 @@
       [:type [:= :add-component]]
       [:id ::sm/uuid]
       [:name :string]
-      [:shapes {:optional true} [:vector {:gen/max 3} :any]]
+      [:shapes {:optional true} [:vector {:gen/max 3} ::sm/any]]
       [:path {:optional true} :string]]]
 
     [:mod-component
      [:map {:title "ModCompoenentChange"}
       [:type [:= :mod-component]]
       [:id ::sm/uuid]
-      [:shapes {:optional true} [:vector {:gen/max 3} :any]]
+      [:shapes {:optional true} [:vector {:gen/max 3} ::sm/any]]
       [:name {:optional true} :string]
       [:variant-id {:optional true} ::sm/uuid]
       [:variant-properties {:optional true} [:vector ::ctv/variant-property]]]]
@@ -377,7 +377,7 @@
     [:update-active-token-themes
      [:map {:title "UpdateActiveTokenThemes"}
       [:type [:= :update-active-token-themes]]
-      [:theme-ids [:set :string]]]]
+      [:theme-paths [:set :string]]]]
 
     [:rename-token-set-group
      [:map {:title "RenameTokenSetGroup"}
@@ -411,21 +411,26 @@
     [:set-tokens-lib
      [:map {:title "SetTokensLib"}
       [:type [:= :set-tokens-lib]]
-      [:tokens-lib :any]]]
+      [:tokens-lib ::sm/any]]]
 
     [:set-token-set
      [:map {:title "SetTokenSetChange"}
       [:type [:= :set-token-set]]
       [:set-name :string]
       [:group? :boolean]
-      [:token-set [:maybe ctob/schema:token-set-attrs]]]]
+      [:token-set [:maybe [:fn ctob/token-set?]]]]]
 
     [:set-token
      [:map {:title "SetTokenChange"}
       [:type [:= :set-token]]
       [:set-name :string]
       [:token-name :string]
-      [:token [:maybe ctob/schema:token-attrs]]]]]])
+      [:token [:maybe ctob/schema:token-attrs]]]]
+
+    [:set-base-font-size
+     [:map {:title "ModBaseFontSize"}
+      [:type [:= :set-base-font-size]]
+      [:base-font-size :string]]]]])
 
 (def schema:changes
   [:sequential {:gen/max 5 :gen/min 1} schema:change])
@@ -482,7 +487,9 @@
                                (cts/shape? shape-new))
                   (ex/raise :type :assertion
                             :code :data-validation
-                            :hint "invalid shape found after applying changes"
+                            :hint (str "invalid shape found after applying changes on file "
+                                       (:id data-new))
+                            :file-id (:id data-new)
                             ::sm/explain (cts/explain-shape shape-new))))))]
 
     (->> (into #{} (map :page-id) items)
@@ -732,27 +739,29 @@
 
           (update-group [group objects]
             (let [lookup   (d/getf objects)
-                  children (->> group :shapes (map lookup))]
+                  children (get group :shapes)]
               (cond
                 ;; If the group is empty we don't make any changes. Will be removed by a later process
                 (empty? children)
                 group
 
                 (= :bool (:type group))
-                (gsh/update-bool-selrect group children objects)
+                (path/update-bool-shape group objects)
 
                 (:masked-group group)
-                (set-mask-selrect group children)
+                (->> (map lookup children)
+                     (set-mask-selrect group))
 
                 :else
-                (gsh/update-group-selrect group children))))]
+                (->> (map lookup children)
+                     (gsh/update-group-selrect group)))))]
 
     (if page-id
       (d/update-in-when data [:pages-index page-id :objects] reg-objects)
       (d/update-in-when data [:components component-id :objects] reg-objects))))
 
 (defmethod process-change :mov-objects
-  [data {:keys [parent-id shapes index page-id component-id ignore-touched after-shape component-swap syncing]}]
+  [data {:keys [parent-id shapes index page-id component-id ignore-touched after-shape allow-altering-copies syncing]}]
   (letfn [(calculate-invalid-targets [objects shape-id]
             (let [reduce-fn #(into %1 (calculate-invalid-targets objects %2))]
               (->> (get-in objects [shape-id :shapes])
@@ -767,7 +776,7 @@
               (and shape
                    (not (invalid-targets parent-id))
                    (not (cfh/components-nesting-loop? objects shape-id parent-id))
-                   (or component-swap ;; On a component swap it's allowed to change the structure of a copy
+                   (or allow-altering-copies ;; In some cases (like a component swap) it's allowed to change the structure of a copy
                        syncing ;; If we are syncing the changes of a main component, it's allowed to change the structure of a copy
                        (and
                         (not (ctk/in-component-copy? (get objects (:parent-id shape)))) ;; We don't want to change the structure of component copies
@@ -918,15 +927,15 @@
 
 (defmethod process-change :add-color
   [data {:keys [color]}]
-  (ctcl/add-color data color))
+  (ctc/add-color data color))
 
 (defmethod process-change :mod-color
   [data {:keys [color]}]
-  (ctcl/set-color data color))
+  (ctc/set-color data color))
 
 (defmethod process-change :del-color
   [data {:keys [id]}]
-  (ctcl/delete-color data id))
+  (ctc/delete-color data id))
 
 ;; DEPRECATED: remove before 2.3
 (defmethod process-change :add-recent-color
@@ -1018,11 +1027,10 @@
                   (ctob/delete-set lib' set-name))
 
                 (not (ctob/get-set lib' set-name))
-                (ctob/add-set lib' (ctob/make-token-set token-set))
+                (ctob/add-set lib' token-set)
 
                 :else
-                (ctob/update-set lib' set-name (fn [prev-token-set]
-                                                 (ctob/make-token-set (merge prev-token-set token-set)))))))))
+                (ctob/update-set lib' set-name (fn [_] token-set)))))))
 
 (defmethod process-change :set-token-theme
   [data {:keys [group theme-name theme]}]
@@ -1043,9 +1051,9 @@
                                      (ctob/make-token-theme (merge prev-token-theme theme)))))))))
 
 (defmethod process-change :update-active-token-themes
-  [data {:keys [theme-ids]}]
+  [data {:keys [theme-paths]}]
   (update data :tokens-lib #(-> % (ctob/ensure-tokens-lib)
-                                (ctob/set-active-themes theme-ids))))
+                                (ctob/set-active-themes theme-paths))))
 
 (defmethod process-change :rename-token-set-group
   [data {:keys [set-group-path set-group-fname]}]
@@ -1065,6 +1073,13 @@
   (update data :tokens-lib #(-> %
                                 (ctob/ensure-tokens-lib)
                                 (ctob/move-set-group from-path to-path before-path before-group))))
+
+;; === Base font size
+
+(defmethod process-change :set-base-font-size
+  [data {:keys [base-font-size]}]
+  (ctf/set-base-font-size data base-font-size))
+
 
 ;; === Operations
 

@@ -8,12 +8,12 @@
   "Media & Font postprocessing."
   (:require
    [app.common.data :as d]
+   [app.common.data.macros :as dm]
    [app.common.exceptions :as ex]
+   [app.common.logging :as l]
    [app.common.media :as cm]
    [app.common.schema :as sm]
    [app.common.schema.openapi :as-alias oapi]
-   [app.common.spec :as us]
-   [app.common.svg :as csvg]
    [app.config :as cf]
    [app.db :as-alias db]
    [app.storage :as-alias sto]
@@ -22,42 +22,42 @@
    [buddy.core.bytes :as bb]
    [buddy.core.codecs :as bc]
    [clojure.java.shell :as sh]
-   [clojure.spec.alpha :as s]
+   [clojure.string]
+   [clojure.xml :as xml]
    [cuerdas.core :as str]
    [datoteka.fs :as fs]
    [datoteka.io :as io])
   (:import
+   clojure.lang.XMLHandler
+   java.io.InputStream
+   javax.xml.XMLConstants
+   javax.xml.parsers.SAXParserFactory
+   org.apache.commons.io.IOUtils
    org.im4java.core.ConvertCmd
    org.im4java.core.IMOperation
    org.im4java.core.Info))
 
-(s/def ::path fs/path?)
-(s/def ::filename string?)
-(s/def ::size integer?)
-(s/def ::headers (s/map-of string? string?))
-(s/def ::mtype string?)
+(def schema:upload
+  (sm/register!
+   ^{::sm/type ::upload}
+   [:map {:title "Upload"}
+    [:filename :string]
+    [:size ::sm/int]
+    [:path ::fs/path]
+    [:mtype {:optional true} :string]
+    [:headers {:optional true}
+     [:map-of :string :string]]]))
 
-(s/def ::upload
-  (s/keys :req-un [::filename ::size ::path]
-          :opt-un [::mtype ::headers]))
+(def ^:private schema:input
+  [:map {:title "Input"}
+   [:path ::fs/path]
+   [:mtype {:optional true} ::sm/text]])
 
-;; A subset of fields from the ::upload spec
-(s/def ::input
-  (s/keys :req-un [::path]
-          :opt-un [::mtype]))
-
-(sm/register!
- ^{::sm/type ::upload}
- [:map {:title "Upload"}
-  [:filename :string]
-  [:size ::sm/int]
-  [:path ::fs/path]
-  [:mtype {:optional true} :string]
-  [:headers {:optional true}
-   [:map-of :string :string]]])
+(def ^:private check-input
+  (sm/check-fn schema:input))
 
 (defn validate-media-type!
-  ([upload] (validate-media-type! upload cm/valid-image-types))
+  ([upload] (validate-media-type! upload cm/image-types))
   ([upload allowed]
    (when-not (contains? allowed (:mtype upload))
      (ex/raise :type :validation
@@ -98,16 +98,43 @@
       (process-error e))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SVG PARSING
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defn- secure-parser-factory
+  [^InputStream input ^XMLHandler handler]
+  (.. (doto (SAXParserFactory/newInstance)
+        (.setFeature XMLConstants/FEATURE_SECURE_PROCESSING true)
+        (.setFeature "http://apache.org/xml/features/disallow-doctype-decl" true))
+      (newSAXParser)
+      (parse input handler)))
+
+(defn- strip-doctype
+  [data]
+  (cond-> data
+    (str/includes? data "<!DOCTYPE")
+    (str/replace #"<\!DOCTYPE[^>]*>" "")))
+
+(defn- parse-svg
+  [text]
+  (let [text (strip-doctype text)]
+    (dm/with-open [istream (IOUtils/toInputStream text "UTF-8")]
+      (xml/parse istream secure-parser-factory))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; IMAGE THUMBNAILS
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(s/def ::width integer?)
-(s/def ::height integer?)
-(s/def ::format #{:jpeg :webp :png})
-(s/def ::quality #(< 0 % 101))
+(def ^:private schema:thumbnail-params
+  [:map {:title "ThumbnailParams"}
+   [:input schema:input]
+   [:format [:enum :jpeg :webp :png]]
+   [:quality [:int {:min 1 :max 100}]]
+   [:width :int]
+   [:height :int]])
 
-(s/def ::thumbnail-params
-  (s/keys :req-un [::input ::format ::width ::height]))
+(def ^:private check-thumbnail-params
+  (sm/check-fn schema:thumbnail-params))
 
 ;; Related info on how thumbnails generation
 ;;  http://www.imagemagick.org/Usage/thumbnails/
@@ -129,30 +156,38 @@
            :data   tmp)))
 
 (defmethod process :generic-thumbnail
-  [{:keys [quality width height] :as params}]
-  (us/assert ::thumbnail-params params)
-  (let [op (doto (IMOperation.)
-             (.addImage)
-             (.autoOrient)
-             (.strip)
-             (.thumbnail ^Integer (int width) ^Integer (int height) ">")
-             (.quality (double quality))
-             (.addImage))]
-    (generic-process (assoc params :operation op))))
+  [params]
+  (let [{:keys [quality width height] :as params}
+        (check-thumbnail-params params)
+
+        operation
+        (doto (IMOperation.)
+          (.addImage)
+          (.autoOrient)
+          (.strip)
+          (.thumbnail ^Integer (int width) ^Integer (int height) ">")
+          (.quality (double quality))
+          (.addImage))]
+
+    (generic-process (assoc params :operation operation))))
 
 (defmethod process :profile-thumbnail
-  [{:keys [quality width height] :as params}]
-  (us/assert ::thumbnail-params params)
-  (let [op (doto (IMOperation.)
-             (.addImage)
-             (.autoOrient)
-             (.strip)
-             (.thumbnail ^Integer (int width) ^Integer (int height) "^")
-             (.gravity "center")
-             (.extent (int width) (int height))
-             (.quality (double quality))
-             (.addImage))]
-    (generic-process (assoc params :operation op))))
+  [params]
+  (let [{:keys [quality width height] :as params}
+        (check-thumbnail-params params)
+
+        operation
+        (doto (IMOperation.)
+          (.addImage)
+          (.autoOrient)
+          (.strip)
+          (.thumbnail ^Integer (int width) ^Integer (int height) "^")
+          (.gravity "center")
+          (.extent (int width) (int height))
+          (.quality (double quality))
+          (.addImage))]
+
+    (generic-process (assoc params :operation operation))))
 
 (defn get-basic-info-from-svg
   [{:keys [tag attrs] :as data}]
@@ -182,12 +217,28 @@
                  {:width (int width)
                   :height (int height)})))]))
 
+(defn- get-dimensions-with-orientation [^String path]
+  ;; Image magick doesn't give info about exif rotation so we use the identify command
+  ;; If we are processing an animated gif we use the first frame with -scene 0
+  (let [dim-result (sh/sh "identify" "-format" "%w %h\n" path)
+        orient-result (sh/sh "identify" "-format" "%[EXIF:Orientation]\n" path)]
+    (if (and (= 0 (:exit dim-result))
+             (= 0 (:exit orient-result)))
+      (let [[w h] (-> (:out dim-result)
+                      str/trim
+                      (clojure.string/split #"\s+")
+                      (->> (mapv #(Integer/parseInt %))))
+            orientation (-> orient-result :out str/trim)]
+        (case orientation
+          ("6" "8") {:width h :height w} ; Rotated 90 or 270 degrees
+          {:width w :height h}))         ; Normal or unknown orientation
+      nil)))
+
 (defmethod process :info
   [{:keys [input] :as params}]
-  (us/assert ::input input)
-  (let [{:keys [path mtype]} input]
+  (let [{:keys [path mtype] :as input} (check-input input)]
     (if (= mtype "image/svg+xml")
-      (let [info (some-> path slurp csvg/parse get-basic-info-from-svg)]
+      (let [info (some-> path slurp parse-svg get-basic-info-from-svg)]
         (when-not info
           (ex/raise :type :validation
                     :code :invalid-svg-file
@@ -202,13 +253,17 @@
                     :code :media-type-mismatch
                     :hint (str "Seems like you are uploading a file whose content does not match the extension."
                                "Expected: " mtype ". Got: " mtype')))
-        ;; For an animated GIF, getImageWidth/Height returns the delta size of one frame (if no frame given
-        ;; it returns size of the last one), whereas getPageWidth/Height always return the full size of
-        ;; any frame.
-        (assoc input
-               :width  (.getPageWidth instance)
-               :height (.getPageHeight instance)
-               :ts (dt/now))))))
+        (let [{:keys [width height]}
+              (or (get-dimensions-with-orientation (str path))
+                  (do
+                    (l/warn "Failed to read image dimensions with orientation; falling back to im4java"
+                            {:path path})
+                    {:width  (.getPageWidth instance)
+                     :height (.getPageHeight instance)}))]
+          (assoc input
+                 :width  width
+                 :height height
+                 :ts (dt/now)))))))
 
 (defmethod process-error org.im4java.core.InfoException
   [error]

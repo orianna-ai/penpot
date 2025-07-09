@@ -132,7 +132,7 @@
        [:> team-members-page* {:team team :profile profile}]
 
        :dashboard-invitations
-       [:> team-invitations-page* {:team team}]
+       [:> team-invitations-page* {:team team :profile profile}]
 
        :dashboard-webhooks
        [:> webhooks-page* {:team team}]
@@ -176,7 +176,7 @@
            :plugin-try-out
            {:plugin plugin
             :on-accept #(create-file! plugin)
-            :on-close #(modal/hide!)}))
+            :on-close modal/hide!}))
 
         open-permissions-dialog
         (fn [plugin]

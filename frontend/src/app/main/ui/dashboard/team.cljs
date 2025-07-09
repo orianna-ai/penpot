@@ -22,6 +22,10 @@
    [app.main.ui.components.file-uploader :refer [file-uploader]]
    [app.main.ui.components.forms :as fm]
    [app.main.ui.dashboard.change-owner]
+   [app.main.ui.dashboard.subscription :refer [team*
+                                               members-cta*
+                                               show-subscription-members-main-banner?
+                                               show-subscription-members-small-banner?]]
    [app.main.ui.dashboard.team-form]
    [app.main.ui.ds.foundations.assets.icon :refer [icon*]]
    [app.main.ui.icons :as i]
@@ -537,10 +541,21 @@
 
   [:*
    [:& header {:section :dashboard-team-members :team team}]
-   [:section {:class (stl/css :dashboard-container :dashboard-team-members)}
+   [:section {:class (stl/css-case
+                      :dashboard-container true
+                      :dashboard-team-members true
+                      :dashboard-top-cta (show-subscription-members-main-banner? team profile))}
+    (when (and (contains? cfg/flags :subscriptions)
+               (show-subscription-members-main-banner? team profile))
+      [:> members-cta* {:banner-is-expanded true :team team :profile profile}])
     [:> team-members*
      {:profile profile
-      :team team}]]])
+      :team team}]
+
+    (when (and
+           (contains? cfg/flags :subscriptions)
+           (show-subscription-members-small-banner? team profile))
+      [:> members-cta* {:banner-is-expanded false :team team :profile profile}])]])
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; INVITATIONS SECTION
@@ -788,7 +803,7 @@
 
 (mf/defc team-invitations-page*
   {::mf/props :obj}
-  [{:keys [team]}]
+  [{:keys [team profile]}]
 
   (mf/with-effect [team]
     (dom/set-html-title
@@ -803,8 +818,16 @@
   [:*
    [:& header {:section :dashboard-team-invitations
                :team team}]
-   [:section {:class (stl/css :dashboard-team-invitations)}
-    [:> invitation-section* {:team team}]]])
+   [:section {:class (stl/css-case
+                      :dashboard-team-invitations true
+                      :dashboard-top-cta (show-subscription-members-main-banner? team profile))}
+    (when (and (contains? cfg/flags :subscriptions)
+               (show-subscription-members-main-banner? team profile))
+      [:> members-cta* {:banner-is-expanded true :team team :profile profile}])
+    [:> invitation-section* {:team team}]
+    (when (and (contains? cfg/flags :subscriptions)
+               (show-subscription-members-small-banner? team profile))
+      [:> members-cta* {:banner-is-expanded false :team team :profile profile}])]])
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; WEBHOOKS SECTION
@@ -890,9 +913,7 @@
            (let [data (:clean-data @form)]
              (if (:id data)
                (on-update-submit form)
-               (on-create-submit form)))))
-
-        on-modal-close #(st/emit! (modal/hide))]
+               (on-create-submit form)))))]
     [:div {:class (stl/css :modal-overlay)}
      [:div {:class (stl/css :modal-container)}
       [:& fm/form {:form form :on-submit on-submit}
@@ -903,7 +924,7 @@
            (tr "modals.create-webhook.title"))]
 
         [:button {:class (stl/css :modal-close-btn)
-                  :on-click on-modal-close} i/close]]
+                  :on-click modal/hide!} i/close]]
 
        [:div {:class (stl/css :modal-content)}
         [:div {:class (stl/css :fields-row)}
@@ -931,7 +952,7 @@
          [:input {:class (stl/css :cancel-button)
                   :type "button"
                   :value (tr "labels.cancel")
-                  :on-click #(modal/hide!)}]
+                  :on-click modal/hide!}]
          [:> fm/submit-button*
           {:label (if webhook
                     (tr "modals.edit-webhook.submit-label")
@@ -1097,7 +1118,7 @@
                         (:is-admin permissions))
 
         on-image-click
-        (mf/use-callback #(dom/click (mf/ref-val finput)))
+        (mf/use-fn #(dom/click (mf/ref-val finput)))
 
         on-file-selected
         (fn [file]
@@ -1161,5 +1182,8 @@
        [:div {:class (stl/css :block-content)}
         document-icon
         [:span {:class (stl/css :block-text)}
-         (tr "labels.num-of-files" (i18n/c (:files stats)))]]]]]))
+         (tr "labels.num-of-files" (i18n/c (:files stats)))]]]
+
+      (when (contains? cfg/flags :subscriptions)
+        [:> team* {:is-owner (:is-owner permissions) :team team}])]]))
 

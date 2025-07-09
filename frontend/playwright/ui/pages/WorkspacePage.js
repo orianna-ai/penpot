@@ -49,6 +49,12 @@ export class WorkspacePage extends BaseWebSocketPage {
       "get-profiles-for-file-comments?file-id=*",
       "workspace/get-profile-for-file-comments.json",
     );
+
+    await BaseWebSocketPage.mockRPC(
+      page,
+      "update-profile-props",
+      "workspace/update-profile-empty.json",
+    );
   }
 
   static anyTeamId = "c7ce0794-0992-8105-8004-38e630f7920a";
@@ -93,7 +99,7 @@ export class WorkspacePage extends BaseWebSocketPage {
     this.tokenThemeUpdateCreateModal = page.getByTestId(
       "token-theme-update-create-modal",
     );
-    this.tokenThemesSetsSidebar = page.getByTestId("token-themes-sets-sidebar");
+    this.tokenThemesSetsSidebar = page.getByTestId("token-management-sidebar");
     this.tokensSidebar = page.getByTestId("tokens-sidebar");
     this.tokenSetItems = page.getByTestId("tokens-set-item");
     this.tokenSetGroupItems = page.getByTestId("tokens-set-group-item");
@@ -170,6 +176,14 @@ export class WorkspacePage extends BaseWebSocketPage {
       "get-file-libraries?file-id=*",
       "workspace/get-file-libraries-empty.json",
     );
+  }
+
+  async mockGetFile(jsonFile) {
+    await this.mockRPC(/get\-file\?/, jsonFile);
+  }
+
+  async mockGetAsset(regex, asset) {
+    await this.mockRPC(new RegExp(regex), asset);
   }
 
   async setupFileWithComments() {
@@ -303,3 +317,5 @@ export class WorkspacePage extends BaseWebSocketPage {
       .click(clickOptions);
   }
 }
+
+export default WorkspacePage;

@@ -1,5 +1,3 @@
-use skia_safe as skia;
-
 #[cfg(target_arch = "wasm32")]
 mod emscripten;
 mod math;
@@ -9,23 +7,29 @@ mod performance;
 mod render;
 mod shapes;
 mod state;
+mod tiles;
 mod utils;
 mod uuid;
 mod view;
 mod wapi;
 mod wasm;
 
-use crate::mem::SerializableResult;
-use crate::shapes::{BoolType, ConstraintH, ConstraintV, StructureEntry, TransformEntry, Type};
-use crate::utils::uuid_from_u32_quartet;
-use crate::uuid::Uuid;
 use indexmap::IndexSet;
+use math::{Bounds, Matrix};
+use mem::SerializableResult;
+use shapes::{
+    BoolType, ConstraintH, ConstraintV, StructureEntry, StructureEntryType, TransformEntry, Type,
+    VerticalAlign,
+};
+use skia_safe as skia;
 use state::State;
+use utils::uuid_from_u32_quartet;
+use uuid::Uuid;
 
 pub(crate) static mut STATE: Option<Box<State>> = None;
 
 #[macro_export]
-macro_rules! with_state {
+macro_rules! with_state_mut {
     ($state:ident, $block:block) => {{
         let $state = unsafe {
             #[allow(static_mut_refs)]
@@ -36,12 +40,37 @@ macro_rules! with_state {
     }};
 }
 
+macro_rules! with_state {
+    ($state:ident, $block:block) => {{
+        let $state = unsafe {
+            #[allow(static_mut_refs)]
+            STATE.as_ref()
+        }
+        .expect("Got an invalid state pointer");
+        $block
+    }};
+}
+
 #[macro_export]
-macro_rules! with_current_shape {
+macro_rules! with_current_shape_mut {
     ($state:ident, |$shape:ident: &mut Shape| $block:block) => {
         let $state = unsafe {
             #[allow(static_mut_refs)]
             STATE.as_mut()
+        }
+        .expect("Got an invalid state pointer");
+        if let Some($shape) = $state.current_shape_mut() {
+            $block
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! with_current_shape {
+    ($state:ident, |$shape:ident: &Shape| $block:block) => {
+        let $state = unsafe {
+            #[allow(static_mut_refs)]
+            STATE.as_ref()
         }
         .expect("Got an invalid state pointer");
         if let Some($shape) = $state.current_shape() {
@@ -53,7 +82,7 @@ macro_rules! with_current_shape {
 /// This is called from JS after the WebGL context has been created.
 #[no_mangle]
 pub extern "C" fn init(width: i32, height: i32) {
-    let state_box = Box::new(State::new(width, height, 2048));
+    let state_box = Box::new(State::new(width, height));
     unsafe {
         STATE = Some(state_box);
     }
@@ -67,15 +96,15 @@ pub extern "C" fn clean_up() {
 
 #[no_mangle]
 pub extern "C" fn clear_drawing_cache() {
-    with_state!(state, {
+    with_state_mut!(state, {
         state.rebuild_tiles();
     });
 }
 
 #[no_mangle]
 pub extern "C" fn set_render_options(debug: u32, dpr: f32) {
-    with_state!(state, {
-        let render_state = state.render_state();
+    with_state_mut!(state, {
+        let render_state = state.render_state_mut();
         render_state.set_debug_flags(debug);
         render_state.set_dpr(dpr);
     });
@@ -83,23 +112,32 @@ pub extern "C" fn set_render_options(debug: u32, dpr: f32) {
 
 #[no_mangle]
 pub extern "C" fn set_canvas_background(raw_color: u32) {
-    with_state!(state, {
+    with_state_mut!(state, {
         let color = skia::Color::new(raw_color);
         state.set_background_color(color);
     });
 }
 
 #[no_mangle]
-pub extern "C" fn render(timestamp: i32) {
-    with_state!(state, {
-        state.start_render_loop(timestamp).expect("Error rendering");
+pub extern "C" fn render(_: i32) {
+    with_state_mut!(state, {
+        state
+            .start_render_loop(performance::get_time())
+            .expect("Error rendering");
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn render_from_cache(_: i32) {
+    with_state_mut!(state, {
+        state.render_from_cache();
     });
 }
 
 #[no_mangle]
 pub extern "C" fn process_animation_frame(timestamp: i32) {
     let result = std::panic::catch_unwind(|| {
-        with_state!(state, {
+        with_state_mut!(state, {
             state
                 .process_animation_frame(timestamp)
                 .expect("Error processing animation frame");
@@ -120,39 +158,66 @@ pub extern "C" fn process_animation_frame(timestamp: i32) {
 
 #[no_mangle]
 pub extern "C" fn reset_canvas() {
-    with_state!(state, {
-        state.render_state().reset_canvas();
+    with_state_mut!(state, {
+        state.render_state_mut().reset_canvas();
     });
 }
 
 #[no_mangle]
 pub extern "C" fn resize_viewbox(width: i32, height: i32) {
-    with_state!(state, {
+    with_state_mut!(state, {
         state.resize(width, height);
     });
 }
 
 #[no_mangle]
 pub extern "C" fn set_view(zoom: f32, x: f32, y: f32) {
-    with_state!(state, {
-        let render_state = state.render_state();
-        let zoom_changed = zoom != render_state.viewbox.zoom;
+    with_state_mut!(state, {
+        let render_state = state.render_state_mut();
         render_state.viewbox.set_all(zoom, x, y);
-        if zoom_changed {
-            with_state!(state, {
-                if state.render_state.options.is_profile_rebuild_tiles() {
-                    state.rebuild_tiles();
-                } else {
-                    state.rebuild_tiles_shallow();
-                }
-            });
-        }
+        with_state_mut!(state, {
+            // We can have renders in progress
+            state.render_state.cancel_animation_frame();
+            if state.render_state.options.is_profile_rebuild_tiles() {
+                state.rebuild_tiles();
+            } else {
+                state.rebuild_tiles_shallow();
+            }
+        });
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn clear_focus_mode() {
+    with_state_mut!(state, {
+        state.clear_focus_mode();
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn set_focus_mode() {
+    let bytes = mem::bytes();
+
+    let entries: Vec<Uuid> = bytes
+        .chunks(size_of::<<Uuid as SerializableResult>::BytesType>())
+        .map(|data| Uuid::from_bytes(data.try_into().unwrap()))
+        .collect();
+
+    with_state_mut!(state, {
+        state.set_focus_mode(entries);
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn init_shapes_pool(capacity: usize) {
+    with_state_mut!(state, {
+        state.init_shapes_pool(capacity);
     });
 }
 
 #[no_mangle]
 pub extern "C" fn use_shape(a: u32, b: u32, c: u32, d: u32) {
-    with_state!(state, {
+    with_state_mut!(state, {
         let id = uuid_from_u32_quartet(a, b, c, d);
         state.use_shape(id);
     });
@@ -160,7 +225,7 @@ pub extern "C" fn use_shape(a: u32, b: u32, c: u32, d: u32) {
 
 #[no_mangle]
 pub extern "C" fn set_parent(a: u32, b: u32, c: u32, d: u32) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         let id = uuid_from_u32_quartet(a, b, c, d);
         shape.set_parent(id);
     });
@@ -168,56 +233,56 @@ pub extern "C" fn set_parent(a: u32, b: u32, c: u32, d: u32) {
 
 #[no_mangle]
 pub extern "C" fn set_shape_masked_group(masked: bool) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_masked(masked);
     });
 }
 
 #[no_mangle]
 pub extern "C" fn set_shape_bool_type(raw_bool_type: u8) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_bool_type(BoolType::from(raw_bool_type));
     });
 }
 
 #[no_mangle]
 pub extern "C" fn set_shape_type(shape_type: u8) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_shape_type(Type::from(shape_type));
     });
 }
 
 #[no_mangle]
 pub extern "C" fn set_shape_selrect(left: f32, top: f32, right: f32, bottom: f32) {
-    with_state!(state, {
+    with_state_mut!(state, {
         state.set_selrect_for_current_shape(left, top, right, bottom);
     });
 }
 
 #[no_mangle]
 pub extern "C" fn set_shape_clip_content(clip_content: bool) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_clip(clip_content);
     });
 }
 
 #[no_mangle]
 pub extern "C" fn set_shape_rotation(rotation: f32) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_rotation(rotation);
     });
 }
 
 #[no_mangle]
 pub extern "C" fn set_shape_transform(a: f32, b: f32, c: f32, d: f32, e: f32, f: f32) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_transform(a, b, c, d, e, f);
     });
 }
 
 #[no_mangle]
 pub extern "C" fn add_shape_child(a: u32, b: u32, c: u32, d: u32) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         let id = uuid_from_u32_quartet(a, b, c, d);
         shape.add_child(id);
     });
@@ -234,12 +299,12 @@ pub extern "C" fn set_children() {
 
     let mut deleted = IndexSet::new();
 
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         (_, deleted) = shape.compute_children_differences(&entries);
         shape.children = entries.clone();
     });
 
-    with_state!(state, {
+    with_state_mut!(state, {
         for id in deleted {
             state.delete_shape(id);
         }
@@ -251,22 +316,36 @@ pub extern "C" fn set_children() {
 }
 
 #[no_mangle]
-pub extern "C" fn store_image(a: u32, b: u32, c: u32, d: u32) {
-    with_state!(state, {
-        let id = uuid_from_u32_quartet(a, b, c, d);
+pub extern "C" fn store_image(
+    a1: u32,
+    b1: u32,
+    c1: u32,
+    d1: u32,
+    a2: u32,
+    b2: u32,
+    c2: u32,
+    d2: u32,
+) {
+    with_state_mut!(state, {
+        let image_id = uuid_from_u32_quartet(a2, b2, c2, d2);
         let image_bytes = mem::bytes();
 
-        if let Err(msg) = state.render_state().add_image(id, &image_bytes) {
+        if let Err(msg) = state.render_state_mut().add_image(image_id, &image_bytes) {
             eprintln!("{}", msg);
         }
 
         mem::free_bytes();
     });
+
+    with_state_mut!(state, {
+        let shape_id = uuid_from_u32_quartet(a1, b1, c1, d1);
+        state.update_tile_for_shape(shape_id);
+    });
 }
 
 #[no_mangle]
 pub extern "C" fn is_image_cached(a: u32, b: u32, c: u32, d: u32) -> bool {
-    with_state!(state, {
+    with_state_mut!(state, {
         let id = uuid_from_u32_quartet(a, b, c, d);
         state.render_state().has_image(&id)
     })
@@ -274,7 +353,7 @@ pub extern "C" fn is_image_cached(a: u32, b: u32, c: u32, d: u32) -> bool {
 
 #[no_mangle]
 pub extern "C" fn set_shape_svg_raw_content() {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         let bytes = mem::bytes();
         let svg_raw_content = String::from_utf8(bytes)
             .unwrap()
@@ -288,100 +367,62 @@ pub extern "C" fn set_shape_svg_raw_content() {
 
 #[no_mangle]
 pub extern "C" fn set_shape_blend_mode(mode: i32) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_blend_mode(render::BlendMode::from(mode));
     });
 }
 
 #[no_mangle]
+pub extern "C" fn set_shape_vertical_align(align: u8) {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
+        shape.set_vertical_align(VerticalAlign::from(align));
+    });
+}
+
+#[no_mangle]
 pub extern "C" fn set_shape_opacity(opacity: f32) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_opacity(opacity);
     });
 }
 
 #[no_mangle]
 pub extern "C" fn set_shape_constraint_h(constraint: u8) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_constraint_h(ConstraintH::from(constraint));
     });
 }
 
 #[no_mangle]
 pub extern "C" fn set_shape_constraint_v(constraint: u8) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_constraint_v(ConstraintV::from(constraint));
     });
 }
 
 #[no_mangle]
 pub extern "C" fn set_shape_hidden(hidden: bool) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_hidden(hidden);
     });
 }
 
 #[no_mangle]
 pub extern "C" fn set_shape_blur(blur_type: u8, hidden: bool, value: f32) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_blur(blur_type, hidden, value);
     });
 }
 
 #[no_mangle]
-pub extern "C" fn set_shape_path_content() {
-    with_current_shape!(state, |shape: &mut Shape| {
-        let bytes = mem::bytes();
-        let raw_segments = bytes
-            .chunks(size_of::<shapes::RawPathData>())
-            .map(|data| shapes::RawPathData {
-                data: data.try_into().unwrap(),
-            })
-            .collect();
-        shape.set_path_segments(raw_segments).unwrap();
-    });
-}
-
-// Extracts a string from the bytes slice until the next null byte (0) and returns the result as a `String`.
-// Updates the `start` index to the end of the extracted string.
-fn extract_string(start: &mut usize, bytes: &[u8]) -> String {
-    match bytes[*start..].iter().position(|&b| b == 0) {
-        Some(pos) => {
-            let end = *start + pos;
-            let slice = &bytes[*start..end];
-            *start = end + 1; // Move the `start` pointer past the null byte
-                              // Call to unsafe function within an unsafe block
-            unsafe { String::from_utf8_unchecked(slice.to_vec()) }
-        }
-        None => {
-            *start = bytes.len(); // Move `start` to the end if no null byte is found
-            String::new()
-        }
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn set_shape_corners(r1: f32, r2: f32, r3: f32, r4: f32) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_corners((r1, r2, r3, r4));
     });
 }
 
 #[no_mangle]
-pub extern "C" fn set_shape_path_attrs(num_attrs: u32) {
-    with_current_shape!(state, |shape: &mut Shape| {
-        let bytes = mem::bytes();
-        let mut start = 0;
-        for _ in 0..num_attrs {
-            let name = extract_string(&mut start, &bytes);
-            let value = extract_string(&mut start, &bytes);
-            shape.set_path_attr(name, value);
-        }
-    });
-}
-
-#[no_mangle]
-pub extern "C" fn propagate_modifiers() -> *mut u8 {
+pub extern "C" fn propagate_modifiers(pixel_precision: bool) -> *mut u8 {
     let bytes = mem::bytes();
 
     let entries: Vec<_> = bytes
@@ -390,8 +431,60 @@ pub extern "C" fn propagate_modifiers() -> *mut u8 {
         .collect();
 
     with_state!(state, {
-        let result = shapes::propagate_modifiers(state, entries);
+        let result = shapes::propagate_modifiers(state, &entries, pixel_precision);
         mem::write_vec(result)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn get_selection_rect() -> *mut u8 {
+    let bytes = mem::bytes();
+
+    let entries: Vec<Uuid> = bytes
+        .chunks(16)
+        .map(|bytes| {
+            uuid_from_u32_quartet(
+                u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+                u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+                u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+            )
+        })
+        .collect();
+
+    with_state_mut!(state, {
+        let bbs: Vec<_> = entries
+            .iter()
+            .flat_map(|id| {
+                let default = Matrix::default();
+                let modifier = state.modifiers.get(id).unwrap_or(&default);
+                state.shapes.get(id).map(|b| b.bounds().transform(modifier))
+            })
+            .collect();
+
+        let result_bound = if bbs.len() == 1 {
+            bbs[0]
+        } else {
+            Bounds::join_bounds(&bbs)
+        };
+
+        let width = result_bound.width();
+        let height = result_bound.height();
+        let center = result_bound.center();
+        let transform = result_bound.transform_matrix().unwrap_or(Matrix::default());
+
+        let mut bytes = vec![0; 40];
+        bytes[0..4].clone_from_slice(&width.to_le_bytes());
+        bytes[4..8].clone_from_slice(&height.to_le_bytes());
+        bytes[8..12].clone_from_slice(&center.x.to_le_bytes());
+        bytes[12..16].clone_from_slice(&center.y.to_le_bytes());
+        bytes[16..20].clone_from_slice(&transform[0].to_le_bytes());
+        bytes[20..24].clone_from_slice(&transform[3].to_le_bytes());
+        bytes[24..28].clone_from_slice(&transform[1].to_le_bytes());
+        bytes[28..32].clone_from_slice(&transform[4].to_le_bytes());
+        bytes[32..36].clone_from_slice(&transform[2].to_le_bytes());
+        bytes[36..40].clone_from_slice(&transform[5].to_le_bytes());
+        mem::write_bytes(bytes)
     })
 }
 
@@ -400,18 +493,30 @@ pub extern "C" fn set_structure_modifiers() {
     let bytes = mem::bytes();
 
     let entries: Vec<_> = bytes
-        .chunks(40)
+        .chunks(44)
         .map(|data| StructureEntry::from_bytes(data.try_into().unwrap()))
         .collect();
 
-    with_state!(state, {
+    with_state_mut!(state, {
         for entry in entries {
-            state.structure.entry(entry.parent).or_insert_with(Vec::new);
-            state
-                .structure
-                .get_mut(&entry.parent)
-                .expect("Parent not found for entry")
-                .push(entry);
+            match entry.entry_type {
+                StructureEntryType::ScaleContent => {
+                    let Some(shape) = state.shapes.get(&entry.id) else {
+                        continue;
+                    };
+                    for id in shape.all_children_with_self(&state.shapes, true) {
+                        state.scale_content.insert(id, entry.value);
+                    }
+                }
+                _ => {
+                    state.structure.entry(entry.parent).or_insert_with(Vec::new);
+                    state
+                        .structure
+                        .get_mut(&entry.parent)
+                        .expect("Parent not found for entry")
+                        .push(entry);
+                }
+            }
         }
     });
 
@@ -420,8 +525,9 @@ pub extern "C" fn set_structure_modifiers() {
 
 #[no_mangle]
 pub extern "C" fn clean_modifiers() {
-    with_state!(state, {
+    with_state_mut!(state, {
         state.structure.clear();
+        state.scale_content.clear();
         state.modifiers.clear();
     });
 }
@@ -435,7 +541,7 @@ pub extern "C" fn set_modifiers() {
         .map(|data| TransformEntry::from_bytes(data.try_into().unwrap()))
         .collect();
 
-    with_state!(state, {
+    with_state_mut!(state, {
         for entry in entries {
             state.modifiers.insert(entry.id, entry.transform);
         }
@@ -453,7 +559,7 @@ pub extern "C" fn add_shape_shadow(
     raw_style: u8,
     hidden: bool,
 ) {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         let color = skia::Color::new(raw_color);
         let style = shapes::ShadowStyle::from(raw_style);
         let shadow = shapes::Shadow::new(color, blur, spread, (x, y), style, hidden);
@@ -463,14 +569,14 @@ pub extern "C" fn add_shape_shadow(
 
 #[no_mangle]
 pub extern "C" fn clear_shape_shadows() {
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.clear_shadows();
     });
 }
 
 #[no_mangle]
 pub extern "C" fn update_shape_tiles() {
-    with_state!(state, {
+    with_state_mut!(state, {
         state.update_tile_for_current_shape();
     });
 }
@@ -497,7 +603,7 @@ pub extern "C" fn set_flex_layout_data(
     let justify_content = shapes::JustifyContent::from_u8(justify_content);
     let wrap_type = shapes::WrapType::from_u8(wrap_type);
 
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_flex_layout_data(
             dir,
             row_gap,
@@ -548,7 +654,7 @@ pub extern "C" fn set_layout_child_data(
         None
     };
 
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_flex_layout_child_data(
             margin_top,
             margin_right,
@@ -587,7 +693,7 @@ pub extern "C" fn set_grid_layout_data(
     let justify_items = shapes::JustifyItems::from_u8(justify_items);
     let justify_content = shapes::JustifyContent::from_u8(justify_content);
 
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_grid_layout_data(
             dir,
             row_gap,
@@ -613,7 +719,7 @@ pub extern "C" fn set_grid_columns() {
         .map(|data| shapes::RawGridTrack::from_bytes(data.try_into().unwrap()))
         .collect();
 
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_grid_columns(entries);
     });
 
@@ -629,7 +735,7 @@ pub extern "C" fn set_grid_rows() {
         .map(|data| shapes::RawGridTrack::from_bytes(data.try_into().unwrap()))
         .collect();
 
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_grid_rows(entries);
     });
 
@@ -645,11 +751,45 @@ pub extern "C" fn set_grid_cells() {
         .map(|data| shapes::RawGridCell::from_bytes(data.try_into().unwrap()))
         .collect();
 
-    with_current_shape!(state, |shape: &mut Shape| {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
         shape.set_grid_cells(entries);
     });
 
     mem::free_bytes();
+}
+
+#[no_mangle]
+pub extern "C" fn show_grid(a: u32, b: u32, c: u32, d: u32) {
+    with_state_mut!(state, {
+        let id = uuid_from_u32_quartet(a, b, c, d);
+        state.render_state.show_grid = Some(id);
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn hide_grid() {
+    with_state_mut!(state, {
+        state.render_state.show_grid = None;
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn get_grid_coords(pos_x: f32, pos_y: f32) -> *mut u8 {
+    let row: i32;
+    let col: i32;
+    with_state!(state, {
+        if let Some((r, c)) = state.get_grid_coords(pos_x, pos_y) {
+            row = r;
+            col = c;
+        } else {
+            row = -1;
+            col = -1;
+        };
+    });
+    let mut bytes = vec![0; 8];
+    bytes[0..4].clone_from_slice(&row.to_le_bytes());
+    bytes[4..8].clone_from_slice(&col.to_le_bytes());
+    mem::write_bytes(bytes)
 }
 
 fn main() {

@@ -26,7 +26,6 @@
   background: var(--input-bg-color);
   border-radius: $br-8;
   padding: 0 var(--sp-s);
-  outline-offset: #{$b-1};
   outline: $b-1 solid var(--input-outline-color);
 
   &:hover {
@@ -44,7 +43,8 @@
   }
 }
 
-.variant-dense {
+.variant-dense,
+.variant-seamless {
   @include use-typography("body-small");
 }
 
@@ -112,7 +112,7 @@
   margin-inline-start: var(--sp-xxs);
 }
 
-.hint-type-error:has(.has-hint) {
+.hint-type-error {
   --input-outline-color: var(--color-foreground-error);
 }
 

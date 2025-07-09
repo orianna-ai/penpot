@@ -17,25 +17,25 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (def schema:typography
-  [:map {:title "Typography"}
-   [:id ::sm/uuid]
-   [:name :string]
-   [:font-id :string]
-   [:font-family :string]
-   [:font-variant-id :string]
-   [:font-size :string]
-   [:font-weight :string]
-   [:font-style :string]
-   [:line-height :string]
-   [:letter-spacing :string]
-   [:text-transform :string]
-   [:modified-at {:optional true} ::sm/inst]
-   [:path {:optional true} [:maybe :string]]
-   [:plugin-data {:optional true} ::ctpg/plugin-data]])
+  (sm/register!
+   ^{::sm/type ::typography}
+   [:map {:title "Typography"}
+    [:id ::sm/uuid]
+    [:name :string]
+    [:font-id :string]
+    [:font-family :string]
+    [:font-variant-id :string]
+    [:font-size :string]
+    [:font-weight :string]
+    [:font-style :string]
+    [:line-height :string]
+    [:letter-spacing :string]
+    [:text-transform :string]
+    [:modified-at {:optional true} ::sm/inst]
+    [:path {:optional true} [:maybe :string]]
+    [:plugin-data {:optional true} ::ctpg/plugin-data]]))
 
-(sm/register! ::typography schema:typography)
-
-(def check-typography!
+(def check-typography
   (sm/check-fn ::typography))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -93,13 +93,16 @@
                                    remap-typography
                                    content)))))
 
+(defn remove-typography-from-node
+  "Remove the typography reference from a node."
+  [node]
+  (dissoc node :typography-ref-file :typography-ref-id))
+
 (defn remove-external-typographies
   "Change the shape so that any use of an external typography now is removed"
   [shape file-id]
-  (let [remove-ref-file #(dissoc % :typography-ref-file :typography-ref-id)]
-
-    (update shape :content
-            (fn [content]
-              (txt/transform-nodes #(not= (:typography-ref-file %) file-id)
-                                   remove-ref-file
-                                   content)))))
+  (update shape :content
+          (fn [content]
+            (txt/transform-nodes #(not= (:typography-ref-file %) file-id)
+                                 remove-typography-from-node
+                                 content))))

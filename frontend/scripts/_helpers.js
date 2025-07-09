@@ -237,18 +237,29 @@ async function renderTemplate(path, context = {}, partials = {}) {
   return mustache.render(content, context, partials);
 }
 
-const extension = {
-  useNewRenderer: true,
+const markedOptions = {
   renderer: {
     link(token) {
-      const href = token.href;
-      const text = token.text;
-      return `<a href="${href}" target="_blank">${text}</a>`;
-    },
-  },
-};
+      if (token.href === "mailto") {
+        return `<a href="mailto:${token.text}">${token.text}</a>`;
+      } else {
+        let target = "_blank";
 
-marked.use(extension);
+        if (token.text.endsWith("|target:self")) {
+          const index = token.text.indexOf("|target:self");
+          token.text = token.text.substring(0, index);
+          target = "_self";
+        }
+
+        const href = token.href;
+        const text = token.text;
+        return `<a href="${href}" target="${target}">${text}</a>`;
+      }
+    }
+  }
+}
+
+marked.use(markedOptions);
 
 async function readTranslations() {
   const langs = [
@@ -263,6 +274,7 @@ async function readTranslations() {
     "fa",
     "fr",
     "he",
+    "sr",
     "nb_NO",
     "pl",
     "pt_BR",
@@ -428,17 +440,11 @@ async function generateTemplates() {
     "../public/images/sprites/assets.svg": assetsSprite,
   };
 
-  const pluginRuntimeUri =
-    process.env.PENPOT_PLUGIN_DEV === "true"
-      ? "http://localhost:4200/index.js?ts=" + manifest.ts
-      : "plugins-runtime/index.js?ts=" + manifest.ts;
-
   content = await renderTemplate(
     "resources/templates/index.mustache",
     {
       manifest: manifest,
       translations: JSON.stringify(translations),
-      pluginRuntimeUri,
       isDebug,
     },
     partials,
@@ -565,10 +571,6 @@ export async function copyAssets() {
 
   await syncDirs("resources/images/", "resources/public/images/");
   await syncDirs("resources/fonts/", "resources/public/fonts/");
-  await syncDirs(
-    "resources/plugins-runtime/",
-    "resources/public/plugins-runtime/",
-  );
 
   const end = process.hrtime(start);
   log.info("done: copy assets", `(${ppt(end)})`);

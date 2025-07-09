@@ -6,6 +6,7 @@
 
 (ns app.rpc.commands.files
   (:require
+   [app.binfile.common :as bfc]
    [app.common.data :as d]
    [app.common.data.macros :as dm]
    [app.common.exceptions :as ex]
@@ -23,6 +24,7 @@
    [app.db.sql :as-alias sql]
    [app.features.fdata :as feat.fdata]
    [app.features.file-migrations :as feat.fmigr]
+   [app.features.logical-deletion :as ldel]
    [app.loggers.audit :as-alias audit]
    [app.loggers.webhooks :as-alias webhooks]
    [app.rpc :as-alias rpc]
@@ -189,7 +191,7 @@
    [:is-shared ::sm/boolean]
    [:project-id ::sm/uuid]
    [:created-at ::dt/instant]
-   [:data {:optional true} :any]])
+   [:data {:optional true} ::sm/any]])
 
 (def schema:permissions-mixin
   [:map {:title "PermissionsMixin"}
@@ -208,10 +210,11 @@
    [:project-id {:optional true} ::sm/uuid]])
 
 (defn- migrate-file
-  [{:keys [::db/conn] :as cfg} {:keys [id] :as file}]
+  [{:keys [::db/conn] :as cfg} {:keys [id] :as file} {:keys [read-only?]}]
   (binding [pmap/*load-fn* (partial feat.fdata/load-pointer cfg id)
             pmap/*tracked* (pmap/create-tracked)]
-    (let [;; For avoid unnecesary overhead of creating multiple pointers and
+    (let [libs (delay (bfc/get-resolved-file-libraries cfg file))
+          ;; For avoid unnecesary overhead of creating multiple pointers and
           ;; handly internally with objects map in their worst case (when
           ;; probably all shapes and all pointers will be readed in any
           ;; case), we just realize/resolve them before applying the
@@ -219,43 +222,45 @@
           file (-> file
                    (update :data feat.fdata/process-pointers deref)
                    (update :data feat.fdata/process-objects (partial into {}))
-                   (fmg/migrate-file))
+                   (fmg/migrate-file libs))]
 
-          ;; When file is migrated, we break the rule of no perform
-          ;; mutations on get operations and update the file with all
-          ;; migrations applied
-          ;;
-          ;; WARN: he following code will not work on read-only mode,
-          ;; it is a known issue; we keep is not implemented until we
-          ;; really need this.
-          file (if (contains? (:features file) "fdata/objects-map")
-                 (feat.fdata/enable-objects-map file)
-                 file)
-          file (if (contains? (:features file) "fdata/pointer-map")
-                 (feat.fdata/enable-pointer-map file)
-                 file)]
+      (if (or read-only? (db/read-only? conn))
+        file
+        (let [;; When file is migrated, we break the rule of no perform
+              ;; mutations on get operations and update the file with all
+              ;; migrations applied
+              file (if (contains? (:features file) "fdata/objects-map")
+                     (feat.fdata/enable-objects-map file)
+                     file)
+              file (if (contains? (:features file) "fdata/pointer-map")
+                     (feat.fdata/enable-pointer-map file)
+                     file)]
 
-      (db/update! conn :file
-                  {:data (blob/encode (:data file))
-                   :version (:version file)
-                   :features (db/create-array conn "text" (:features file))}
-                  {:id id})
+          (db/update! conn :file
+                      {:data (blob/encode (:data file))
+                       :version (:version file)
+                       :features (db/create-array conn "text" (:features file))}
+                      {:id id}
+                      {::db/return-keys false})
 
-      (when (contains? (:features file) "fdata/pointer-map")
-        (feat.fdata/persist-pointers! cfg id))
+          (when (contains? (:features file) "fdata/pointer-map")
+            (feat.fdata/persist-pointers! cfg id))
 
-      (feat.fmigr/upsert-migrations! conn file)
-      (feat.fmigr/resolve-applied-migrations cfg file))))
+          (feat.fmigr/upsert-migrations! conn file)
+          (feat.fmigr/resolve-applied-migrations cfg file))))))
 
 (defn get-file
   [{:keys [::db/conn ::wrk/executor] :as cfg} id
    & {:keys [project-id
              migrate?
              include-deleted?
-             lock-for-update?]
+             lock-for-update?
+             preload-pointers?]
       :or {include-deleted? false
            lock-for-update? false
-           migrate? true}}]
+           migrate? true
+           preload-pointers? false}
+      :as options}]
 
   (assert (db/connection? conn) "expected cfg with valid connection")
 
@@ -273,10 +278,16 @@
         ;; because it has heavy and synchronous operations for
         ;; decoding file body that are not very friendly with virtual
         ;; threads.
-        file   (px/invoke! executor #(decode-row file))]
+        file   (px/invoke! executor #(decode-row file))
 
-    (if (and migrate? (fmg/need-migration? file))
-      (migrate-file cfg file)
+        file   (if (and migrate? (fmg/need-migration? file))
+                 (migrate-file cfg file options)
+                 file)]
+
+    (if preload-pointers?
+      (binding [pmap/*load-fn* (partial feat.fdata/load-pointer cfg id)]
+        (update file :data feat.fdata/process-pointers deref))
+
       file)))
 
 (defn get-minimal-file
@@ -484,7 +495,7 @@
 
   (let [perms (get-permissions conn profile-id file-id share-id)
 
-        file  (get-file cfg file-id)
+        file  (get-file cfg file-id :read-only? true)
 
         proj  (db/get conn :project {:id (:project-id file)})
 
@@ -548,7 +559,10 @@
           f.project_id,
           f.created_at,
           f.modified_at,
+          f.data_backend,
+          f.data_ref_id,
           f.name,
+          f.version,
           f.is_shared,
           ft.media_id,
           p.team_id
@@ -584,7 +598,11 @@
   (teams/check-read-permissions! conn profile-id team-id)
   (->> (db/exec! conn [sql:team-shared-files team-id])
        (into #{} (comp
-                  (map decode-row)
+                  ;; NOTE: this decode operation is a workaround for a
+                  ;; fast fix, this should be approached with a more
+                  ;; efficient implementation, for now it loads all
+                  ;; the files in memory.
+                  (map (partial bfc/decode-file cfg))
                   (map (fn [row]
                          (if-let [media-id (:media-id row)]
                            (-> row
@@ -607,44 +625,6 @@
 
 ;; --- COMMAND QUERY: get-file-libraries
 
-(def ^:private sql:get-file-libraries
-  "WITH RECURSIVE libs AS (
-     SELECT fl.*, flr.synced_at
-       FROM file AS fl
-       JOIN file_library_rel AS flr ON (flr.library_file_id = fl.id)
-      WHERE flr.file_id = ?::uuid
-    UNION
-     SELECT fl.*, flr.synced_at
-       FROM file AS fl
-       JOIN file_library_rel AS flr ON (flr.library_file_id = fl.id)
-       JOIN libs AS l ON (flr.file_id = l.id)
-   )
-   SELECT l.id,
-          l.features,
-          l.project_id,
-          p.team_id,
-          l.created_at,
-          l.modified_at,
-          l.deleted_at,
-          l.name,
-          l.revn,
-          l.vern,
-          l.synced_at,
-          l.is_shared
-     FROM libs AS l
-    INNER JOIN project AS p ON (p.id = l.project_id)
-    WHERE l.deleted_at IS NULL OR l.deleted_at > now();")
-
-(defn get-file-libraries
-  [conn file-id]
-  (into []
-        (comp
-         ;; FIXME: :is-indirect set to false to all rows looks
-         ;; completly useless
-         (map #(assoc % :is-indirect false))
-         (map decode-row))
-        (db/exec! conn [sql:get-file-libraries file-id])))
-
 (def ^:private schema:get-file-libraries
   [:map {:title "get-file-libraries"}
    [:file-id ::sm/uuid]])
@@ -656,7 +636,7 @@
   [{:keys [::db/pool] :as cfg} {:keys [::rpc/profile-id file-id]}]
   (dm/with-open [conn (db/open pool)]
     (check-read-permissions! conn profile-id file-id)
-    (get-file-libraries conn file-id)))
+    (bfc/get-file-libraries conn file-id)))
 
 
 ;; --- COMMAND QUERY: Files that use this File library
@@ -741,7 +721,9 @@
                              :project-id project-id
                              :file-id id)
 
-        file (get-file cfg id :project-id project-id)]
+        file (get-file cfg id
+                       :project-id project-id
+                       :read-only? true)]
 
     (-> (cfeat/get-team-enabled-features cf/flags team)
         (cfeat/check-client-features! (:features params))
@@ -960,12 +942,13 @@
 ;; --- MUTATION COMMAND: delete-file
 
 (defn- mark-file-deleted
-  [conn file-id]
-  (let [file (db/update! conn :file
-                         {:deleted-at (dt/now)}
-                         {:id file-id}
-                         {::db/return-keys [:id :name :is-shared :deleted-at
-                                            :project-id :created-at :modified-at]})]
+  [conn team file-id]
+  (let [delay (ldel/get-deletion-delay team)
+        file  (db/update! conn :file
+                          {:deleted-at (dt/in-future delay)}
+                          {:id file-id}
+                          {::db/return-keys [:id :name :is-shared :deleted-at
+                                             :project-id :created-at :modified-at]})]
     (wrk/submit! {::db/conn conn
                   ::wrk/task :delete-object
                   ::wrk/params {:object :file
@@ -981,7 +964,11 @@
 (defn- delete-file
   [{:keys [::db/conn] :as cfg} {:keys [profile-id id] :as params}]
   (check-edition-permissions! conn profile-id id)
-  (let [file (mark-file-deleted conn id)]
+  (let [team (teams/get-team conn
+                             :profile-id profile-id
+                             :file-id id)
+        file (mark-file-deleted conn team id)]
+
     (rph/with-meta (rph/wrap)
       {::audit/props {:project-id (:project-id file)
                       :name (:name file)

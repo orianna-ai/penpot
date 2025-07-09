@@ -28,8 +28,8 @@
    [app.main.ui.onboarding.team-choice :refer [onboarding-team-modal]]
    [app.main.ui.releases :refer [release-notes-modal]]
    [app.main.ui.static :as static]
-   [app.util.dom :as dom]
    [app.util.i18n :refer [tr]]
+   [app.util.theme :as theme]
    [beicon.v2.core :as rx]
    [rumext.v2 :as mf]))
 
@@ -357,11 +357,10 @@
   []
   (let [route   (mf/deref refs/route)
         edata   (mf/deref refs/exception)
-        profile (mf/deref refs/profile)
-        theme   (or (:theme profile) "default")]
+        profile (mf/deref refs/profile)]
 
-    (mf/with-effect [theme]
-      (dom/set-html-theme-color theme))
+    ;; initialize themes
+    (theme/use-initialize profile)
 
     [:& (mf/provider ctx/current-route) {:value route}
      [:& (mf/provider ctx/current-profile) {:value profile}

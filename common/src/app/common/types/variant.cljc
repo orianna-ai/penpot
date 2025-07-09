@@ -23,15 +23,18 @@
 
 (def schema:variant-component
   ;; A component that is part of a variant set.
-  [:map
-   [:variant-id {:optional true} ::sm/uuid]
-   [:variant-properties {:optional true} [:vector schema:variant-property]]])
+  (sm/register!
+   ^{::sm/type ::variant-component}
+   [:map
+    [:variant-id {:optional true} ::sm/uuid]
+    [:variant-properties {:optional true} [:vector schema:variant-property]]]))
 
 (def schema:variant-shape
   ;; The root shape of the main instance of a variant component.
   [:map
    [:variant-id {:optional true} ::sm/uuid]
-   [:variant-name {:optional true} :string]])
+   [:variant-name {:optional true} :string]
+   [:variant-error {:optional true} :string]])
 
 (def schema:variant-container
   ;; is a board that contains all variant components of a variant set,
@@ -40,7 +43,6 @@
    [:is-variant-container {:optional true} :boolean]])
 
 (sm/register! ::variant-property schema:variant-property)
-(sm/register! ::variant-component schema:variant-component)
 (sm/register! ::variant-shape schema:variant-shape)
 (sm/register! ::variant-container schema:variant-container)
 
@@ -52,6 +54,7 @@
 
 (def property-prefix "Property")
 (def property-regex (re-pattern (str property-prefix "(\\d+)")))
+(def property-max-length 60)
 (def value-prefix "Value ")
 
 
@@ -105,8 +108,8 @@
      (add-new-props assigned remaining))))
 
 
-(defn properties-map-to-string
-  "Transforms a map of properties to a string of properties omitting the empty ones"
+(defn properties-map->formula
+  "Transforms a map of properties to a formula of properties omitting the empty ones"
   [properties]
   (->> properties
        (keep (fn [{:keys [name value]}]
@@ -115,22 +118,26 @@
        (str/join ", ")))
 
 
-(defn properties-string-to-map
-  "Transforms a string of properties to a map of properties"
+(defn properties-formula->map
+  "Transforms a formula of properties to a map of properties"
   [s]
   (->> (str/split s ",")
-       (mapv #(str/split % "="))
+       (mapv #(str/split % "=" 2))
+       (filter (fn [[_ v]] (not (str/blank? v))))
        (mapv (fn [[k v]]
                {:name (str/trim k)
                 :value (str/trim v)}))))
 
 
-(defn valid-properties-string?
-  "Checks if a string of properties has a processable format or not"
+(defn valid-properties-formula?
+  "Checks if a formula is valid"
   [s]
-  (let [pattern #"^([a-zA-Z0-9\s]+=[a-zA-Z0-9\s]+)(,\s*[a-zA-Z0-9\s]+=[a-zA-Z0-9\s]+)*$"]
-    (not (nil? (re-matches pattern s)))))
-
+  (->> (str/split s ",")
+       (mapv #(str/split % "=" 2))
+       (every? #(and (= 2 (count %))
+                     (not (str/blank? (first %)))
+                     (< (count (first %)) property-max-length)
+                     (< (count (second %)) property-max-length)))))
 
 (defn find-properties-to-remove
   "Compares two property maps to find which properties should be removed"
@@ -151,6 +158,46 @@
   [prev-props upd-props]
   (let [prev-names (set (map :name prev-props))]
     (filterv #(not (contains? prev-names (:name %))) upd-props)))
+
+
+(defn- split-base-name-and-number
+  "Extract the number in parentheses from an item, if present, and return both the base name and the number"
+  [item]
+  (let [pattern-num-parens #"\(\d+\)$"
+        pattern-num        #"\d+"
+        base (-> item (str/replace pattern-num-parens "") (str/trim))
+        num  (some->> item (re-find pattern-num-parens) (re-find pattern-num) (d/parse-integer))]
+    [base (d/nilv num 0)]))
+
+(defn- group-numbers-by-base-name
+  "Return a map with a set of numbers associated to each base name"
+  [items]
+  (reduce (fn [acc item]
+            (let [[base num] (split-base-name-and-number item)]
+              (update acc base (fnil conj #{}) num)))
+          {}
+          items))
+
+(defn update-number-in-repeated-item
+  "Add, keep or update a number in parentheses for a given item, if necessary, depending on the items
+   already present in a list, to avoid repetitions"
+  [items item]
+  (let [names      (group-numbers-by-base-name items)
+        [base num] (split-base-name-and-number item)
+        nums-taken (get names base #{})]
+    (loop [n num]
+      (if (nums-taken n)
+        (recur (inc n))
+        (str base (when (pos? n) (str " (" n ")")))))))
+
+(defn update-number-in-repeated-prop-names
+  "Add, keep or update a number for each prop name depending on the previous ones"
+  [props]
+  (->> props
+       (reduce (fn [acc prop]
+                 (conj acc {:name (update-number-in-repeated-item (mapv :name acc) (:name prop))
+                            :value (:value prop)}))
+               [])))
 
 
 (defn find-index-for-property-name

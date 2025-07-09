@@ -8,7 +8,6 @@
   (:require
    [app.common.data :as d]
    [app.common.data.macros :as dm]
-   [app.common.features :as cfeat]
    [app.common.files.changes :as cfc]
    [app.common.files.helpers :as cfh]
    [app.common.geom.matrix :as gmt]
@@ -19,24 +18,26 @@
    [app.common.schema :as sm]
    [app.common.types.component :as ctk]
    [app.common.types.file :as ctf]
+   [app.common.types.path :as path]
    [app.common.types.shape.layout :as ctl]
    [app.common.types.tokens-lib :as ctob]
    [app.common.uuid :as uuid]))
 
 ;; Auxiliary functions to help create a set of changes (undo + redo)
 
-(sm/register!
- ^{::sm/type ::changes}
- [:map {:title "changes"}
-  [:redo-changes vector?]
-  [:undo-changes seq?]
-  [:origin {:optional true} any?]
-  [:save-undo? {:optional true} boolean?]
-  [:stack-undo? {:optional true} boolean?]
-  [:undo-group {:optional true} any?]])
+(def schema:changes
+  (sm/register!
+   ^{::sm/type ::changes}
+   [:map {:title "changes"}
+    [:redo-changes vector?]
+    [:undo-changes seq?]
+    [:origin {:optional true} ::sm/any]
+    [:save-undo? {:optional true} boolean?]
+    [:stack-undo? {:optional true} boolean?]
+    [:undo-group {:optional true} ::sm/any]]))
 
 (def check-changes!
-  (sm/check-fn ::changes))
+  (sm/check-fn schema:changes))
 
 (defn empty-changes
   ([origin page-id]
@@ -84,8 +85,7 @@
 
 (defn with-objects
   [changes objects]
-  (let [fdata (binding [cfeat/*current* #{"components/v2"}]
-                (ctf/make-file-data (uuid/next) uuid/zero))
+  (let [fdata (ctf/make-file-data (uuid/next) uuid/zero)
         fdata (assoc-in fdata [:pages-index uuid/zero :objects] objects)]
     (vary-meta changes assoc
                ::file-data fdata
@@ -126,28 +126,40 @@
 ; TODO: remove this when not needed
 (defn- assert-page-id!
   [changes]
-  (dm/assert!
-   "Give a page-id or call (with-page) before using this function"
-   (contains? (meta changes) ::page-id)))
+  (assert
+   (contains? (meta changes) ::page-id)
+   "Give a page-id or call (with-page) before using this function"))
+
+(defn- assert-page!
+  [changes]
+  (assert
+   (contains? (meta changes) ::page)
+   "Give a page or call (with-page) before using this function"))
 
 (defn- assert-container-id!
   [changes]
-  (dm/assert!
-   "Give a page-id or call (with-container) before using this function"
+  (assert
    (or (contains? (meta changes) ::page-id)
-       (contains? (meta changes) ::component-id))))
+       (contains? (meta changes) ::component-id))
+   "Give a page-id or call (with-container) before using this function"))
 
 (defn- assert-objects!
   [changes]
-  (dm/assert!
-   "Call (with-objects) before using this function"
-   (contains? (meta changes) ::file-data)))
+  (assert
+   (contains? (meta changes) ::file-data)
+   "Call (with-objects) before using this function"))
 
 (defn- assert-library!
   [changes]
-  (dm/assert!
-   "Call (with-library-data) before using this function"
-   (contains? (meta changes) ::library-data)))
+  (assert
+   (contains? (meta changes) ::library-data)
+   "Call (with-library-data) before using this function"))
+
+(defn- assert-file-data!
+  [changes]
+  (assert
+   (contains? (meta changes) ::file-data)
+   "Call (with-file-data) before using this function"))
 
 (defn- lookup-objects
   [changes]
@@ -156,9 +168,9 @@
 
 (defn apply-changes-local
   [changes & {:keys [apply-to-library?]}]
-  (dm/assert!
-   "expected valid changes"
-   (check-changes! changes))
+  (assert
+   (check-changes! changes)
+   "expected valid changes")
 
   (if-let [file-data (::file-data (meta changes))]
     (let [library-data  (::library-data (meta changes))
@@ -197,6 +209,7 @@
 
 (defn mod-page
   ([changes options]
+   (assert-page! changes)
    (let [page (::page (meta changes))]
      (mod-page changes page options)))
 
@@ -227,6 +240,7 @@
   ([changes type id namespace key value]
    (set-plugin-data changes type id nil namespace key value))
   ([changes type id page-id namespace key value]
+   (assert-file-data! changes)
    (let [data (::file-data (meta changes))
          old-val
          (case type
@@ -293,6 +307,8 @@
 
 (defn set-guide
   [changes id guide]
+  (assert-page-id! changes)
+  (assert-page! changes)
   (let [page-id (::page-id (meta changes))
         page    (::page (meta changes))
         old-val (dm/get-in page [:guides id])]
@@ -306,8 +322,11 @@
                                     :page-id page-id
                                     :id id
                                     :params old-val}))))
+
 (defn set-flow
   [changes id flow]
+  (assert-page-id! changes)
+  (assert-page! changes)
   (let [page-id (::page-id (meta changes))
         page    (::page (meta changes))
         old-val (dm/get-in page [:flows id])
@@ -326,6 +345,8 @@
 
 (defn set-comment-thread-position
   [changes {:keys [id frame-id position] :as thread}]
+  (assert-page-id! changes)
+  (assert-page! changes)
   (let [page-id (::page-id (meta changes))
         page    (::page (meta changes))
 
@@ -347,6 +368,8 @@
 
 (defn set-default-grid
   [changes type params]
+  (assert-page-id! changes)
+  (assert-page! changes)
   (let [page-id (::page-id (meta changes))
         page    (::page (meta changes))
         old-val (dm/get-in page [:grids type])
@@ -441,8 +464,8 @@
 
            (some? index)
            (assoc :index index)
-           (:component-swap options)
-           (assoc :component-swap true)
+           (:allow-altering-copies options)
+           (assoc :allow-altering-copies true)
            (:ignore-touched options)
            (assoc :ignore-touched true))
 
@@ -450,12 +473,14 @@
          (fn [undo-changes shape]
            (let [prev-sibling (cfh/get-prev-sibling objects (:id shape))]
              (conj undo-changes
-                   {:type :mov-objects
-                    :page-id (::page-id (meta changes))
-                    :parent-id (:parent-id shape)
-                    :shapes [(:id shape)]
-                    :after-shape prev-sibling
-                    :index 0}))) ; index is used in case there is no after-shape (moving bottom shapes)
+                   (cond-> {:type :mov-objects
+                            :page-id (::page-id (meta changes))
+                            :parent-id (:parent-id shape)
+                            :shapes [(:id shape)]
+                            :after-shape prev-sibling
+                            :index 0} ; index is used in case there is no after-shape (moving bottom shapes)
+                     (:allow-altering-copies options)
+                     (assoc :allow-altering-copies true)))))
 
          restore-touched-change
          {:type :mod-obj
@@ -480,9 +505,12 @@
           (let [old-val (get old attr)
                 new-val (get new attr)]
             (not= old-val new-val)))
-        new-obj (if with-objects?
-                  (update-fn object objects)
-                  (update-fn object))]
+
+        new-obj
+        (if with-objects?
+          (update-fn object objects)
+          (update-fn object))]
+
     (when-not (= object new-obj)
       (let [attrs (or attrs (d/concat-set (keys object) (keys new-obj)))]
         (filter (partial changed? object new-obj) attrs)))))
@@ -658,10 +686,14 @@
                                  (empty? children) ;; a parent with no children will be deleted,
                                  nil               ;; so it does not need resize
 
-                                 (= (:type parent) :bool)
-                                 (gsh/update-bool-selrect parent children objects)
+                                 (cfh/bool-shape? parent)
+                                 (path/update-bool-shape parent objects)
 
-                                 (= (:type parent) :group)
+                                 (cfh/group-shape? parent)
+                                 ;; FIXME: this functions should be
+                                 ;; normalized in the same way as
+                                 ;; update-bool in order to make all
+                                 ;; this code consistent
                                  (if (:masked-group parent)
                                    (gsh/update-mask-selrect parent children)
                                    (gsh/update-group-selrect parent children)))]
@@ -768,10 +800,10 @@
         (apply-changes-local))))
 
 (defn update-active-token-themes
-  [changes token-active-theme-ids prev-token-active-theme-ids]
+  [changes active-theme-paths prev-active-theme-paths]
   (-> changes
-      (update :redo-changes conj {:type :update-active-token-themes :theme-ids token-active-theme-ids})
-      (update :undo-changes conj {:type :update-active-token-themes :theme-ids prev-token-active-theme-ids})
+      (update :redo-changes conj {:type :update-active-token-themes :theme-paths active-theme-paths})
+      (update :undo-changes conj {:type :update-active-token-themes :theme-paths prev-active-theme-paths})
       (apply-changes-local)))
 
 (defn set-token-theme [changes group theme-name theme]
@@ -841,6 +873,7 @@
 
 (defn set-tokens-lib
   [changes tokens-lib]
+  (assert-library! changes)
   (let [library-data (::library-data (meta changes))
         prev-tokens-lib (get library-data :tokens-lib)]
     (-> changes
@@ -885,7 +918,7 @@
     (-> changes
         (update :redo-changes conj {:type :set-token-set
                                     :set-name name
-                                    :token-set (assoc prev-token-set :name new-name)
+                                    :token-set (ctob/rename prev-token-set new-name)
                                     :group? false})
         (update :undo-changes conj {:type :set-token-set
                                     :set-name new-name
@@ -906,11 +939,11 @@
                                     :group? group?})
         (update :undo-changes conj (if prev-token-set
                                      {:type :set-token-set
-                                      :set-name (or
-                                                 ;; Undo of edit
-                                                 (:name token-set)
-                                                 ;; Undo of delete
-                                                 set-name)
+                                      :set-name (if token-set
+                                                  ;; Undo of edit
+                                                  (ctob/get-name token-set)
+                                                  ;; Undo of delete
+                                                  set-name)
                                       :token-set prev-token-set
                                       :group? group?}
                                      ;; Undo of create
@@ -1049,6 +1082,33 @@
                                   :id id
                                   :delta delta})))
 
+(defn reorder-children
+  [changes id children]
+  (assert-page-id! changes)
+  (assert-objects! changes)
+
+  (let [page-id (::page-id (meta changes))
+        objects (lookup-objects changes)
+        shape (get objects id)
+        old-children (:shapes shape)
+
+        redo-change
+        {:type :reorder-children
+         :parent-id (:id shape)
+         :page-id page-id
+         :shapes children}
+
+        undo-change
+        {:type :reorder-children
+         :parent-id (:id shape)
+         :page-id page-id
+         :shapes old-children}]
+
+    (-> changes
+        (update :redo-changes conj redo-change)
+        (update :undo-changes conj undo-change)
+        (apply-changes-local))))
+
 (defn reorder-grid-children
   [changes ids]
   (assert-page-id! changes)
@@ -1103,3 +1163,16 @@
 (defn get-page-id
   [changes]
   (::page-id (meta changes)))
+
+(defn set-base-font-size
+  [changes new-base-font-size]
+  (assert-file-data! changes)
+  (let [file-data  (::file-data (meta changes))
+        previous-font-size (ctf/get-base-font-size file-data)]
+    (-> changes
+        (update :redo-changes conj {:type :set-base-font-size
+                                    :base-font-size new-base-font-size})
+
+        (update :undo-changes conj {:type :set-base-font-size
+                                    :base-font-size previous-font-size})
+        (apply-changes-local))))

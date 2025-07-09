@@ -10,7 +10,7 @@
    [app.common.data :as d]
    [app.common.types.color :as ctc]
    [app.main.ui.components.numeric-input :refer [numeric-input*]]
-   [app.main.ui.components.reorder-handler :refer [reorder-handler]]
+   [app.main.ui.components.reorder-handler :refer [reorder-handler*]]
    [app.main.ui.components.select :refer [select]]
    [app.main.ui.hooks :as h]
    [app.main.ui.icons :as i]
@@ -145,11 +145,11 @@
                    :dnd-over-bot (= (:over dprops) :bot))}
 
      (when (some? on-reorder)
-       [:& reorder-handler {:ref dref}])
+       [:> reorder-handler* {:ref dref}])
 
      ;; Stroke Color
      ;; FIXME: memorize stroke color
-     [:> color-row* {:color (ctc/stroke->shape-color stroke)
+     [:> color-row* {:color (ctc/stroke->color stroke)
                      :index index
                      :title title
                      :on-change on-color-change-refactor
@@ -176,7 +176,7 @@
          :select-on-focus select-on-focus
          :on-blur on-blur}]]
 
-      [:div {:class (stl/css :select-wrapper)
+      [:div {:class (stl/css :select-wrapper :stroke-alignment-select)
              :data-testid "stroke.alignment"}
        [:& select
         {:default-value stroke-alignment
@@ -184,7 +184,7 @@
          :on-change on-alignment-change}]]
 
       (when-not disable-stroke-style
-        [:div {:class (stl/css :select-wrapper)
+        [:div {:class (stl/css :select-wrapper :stroke-style-select)
                :data-testid "stroke.style"}
          [:& select
           {:default-value stroke-style

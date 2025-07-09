@@ -49,6 +49,8 @@
             objects (-> (dsh/get-page data page-id)
                         (get :objects))
 
+            updated-properties   (ctv/update-number-in-repeated-prop-names updated-properties)
+
             properties-to-remove (ctv/find-properties-to-remove previous-properties updated-properties)
             properties-to-add    (ctv/find-properties-to-add previous-properties updated-properties)
             properties-to-update (ctv/find-properties-to-update previous-properties updated-properties)
@@ -130,6 +132,28 @@
          (dwu/commit-undo-transaction undo-id))))))
 
 
+(defn update-error
+  "Updates the error in a component"
+  [component-id value]
+  (ptk/reify ::update-error
+    ptk/WatchEvent
+    (watch [it state _]
+      (let [page-id    (:current-page-id state)
+            data       (dsh/lookup-file-data state)
+            objects    (-> (dsh/get-page data page-id)
+                           (get :objects))
+
+            changes    (-> (pcb/empty-changes it page-id)
+                           (pcb/with-library-data data)
+                           (pcb/with-objects objects)
+                           (clvp/generate-set-variant-error component-id value))
+            undo-id    (js/Symbol)]
+        (rx/of
+         (dwu/start-undo-transaction undo-id)
+         (dch/commit-changes changes)
+         (dwu/commit-undo-transaction undo-id))))))
+
+
 (defn remove-property
   "Remove the variant property on the position pos
    in all the components with this variant-id"
@@ -153,6 +177,51 @@
          (dch/commit-changes changes)
          (dwu/commit-undo-transaction undo-id))))))
 
+
+(defn remove-empty-properties
+  "Remove every empty property for all components when their respective values are empty
+   for all of them"
+  [variant-id]
+  (ptk/reify ::remove-empty-properties
+    ptk/WatchEvent
+    (watch [it state _]
+      (let [page-id (:current-page-id state)
+            data    (dsh/lookup-file-data state)
+            objects (-> (dsh/get-page data page-id)
+                        (get :objects))
+
+            variant-components (cfv/find-variant-components data objects variant-id)
+
+            properties-empty-pos (->> variant-components
+                                      (mapcat :variant-properties)
+                                      (group-by :name)
+                                      (map-indexed
+                                       (fn [i [_ v]]
+                                         [i (->> v
+                                                 (map :value)
+                                                 (remove empty?)
+                                                 empty?)]))
+                                      (reverse))
+
+            changes (-> (pcb/empty-changes it page-id)
+                        (pcb/with-library-data data)
+                        (pcb/with-objects objects))
+
+            changes (reduce
+                     (fn [changes [pos property-empty?]]
+                       (if property-empty?
+                         (-> changes
+                             (clvp/generate-remove-property variant-id pos))
+                         changes))
+                     changes
+                     properties-empty-pos)
+
+            undo-id (js/Symbol)]
+
+        (rx/of
+         (dwu/start-undo-transaction undo-id)
+         (dch/commit-changes changes)
+         (dwu/commit-undo-transaction undo-id))))))
 
 
 (defn add-new-property

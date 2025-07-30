@@ -22,7 +22,8 @@
    [app.common.types.components-list :as ctkl]
    [app.common.types.container :as ctn]
    [app.common.types.file :as ctf]
-   [app.common.types.shape.layout :as ctl]
+   [app.common.types.library :as ctl]
+   [app.common.types.shape.layout :as ctsl]
    [app.common.types.typography :as ctt]
    [app.common.uuid :as uuid]
    [app.config :as cf]
@@ -36,6 +37,7 @@
    [app.main.data.workspace :as-alias dw]
    [app.main.data.workspace.groups :as dwg]
    [app.main.data.workspace.notifications :as-alias dwn]
+   [app.main.data.workspace.pages :as-alias dwpg]
    [app.main.data.workspace.selection :as dws]
    [app.main.data.workspace.shapes :as dwsh]
    [app.main.data.workspace.specialized-panel :as dwsp]
@@ -194,7 +196,7 @@
         (if (str/empty? new-name)
           (rx/empty)
           (let [data   (dsh/lookup-file-data state)
-                color  (-> (ctc/get-color data id)
+                color  (-> (ctl/get-color data id)
                            (assoc :name new-name)
                            (d/without-nils)
                            (ctc/check-library-color))]
@@ -700,7 +702,7 @@
             (fn [page-id shape-id]
               (rx/merge
                (->> stream
-                    (rx/filter (ptk/type? ::dw/initialize-page))
+                    (rx/filter (ptk/type? ::dwpg/initialize-page))
                     (rx/take 1)
                     (rx/observe-on :async)
                     (rx/mapcat (fn [_] (select-and-zoom shape-id))))
@@ -961,8 +963,8 @@
             orig-shapes (when keep-touched? (cfh/get-children-with-self objects (:id shape)))
 
             ;; If the target parent is a grid layout we need to pass the target cell
-            target-cell (when (ctl/grid-layout? parent)
-                          (ctl/get-cell-by-shape-id parent (:id shape)))
+            target-cell (when (ctsl/grid-layout? parent)
+                          (ctsl/get-cell-by-shape-id parent (:id shape)))
 
             index (find-shape-index objects (:parent-id shape) (:id shape))
 
@@ -978,9 +980,11 @@
                 (cll/generate-component-swap objects shape ldata page libraries id-new-component
                                              index target-cell keep-props-values keep-touched?))
 
-            changes (if keep-touched?
-                      (clv/generate-keep-touched changes new-shape shape orig-shapes page libraries ldata)
-                      changes)]
+            [changes parents-of-swapped]
+            (if keep-touched?
+              (clv/generate-keep-touched changes new-shape shape orig-shapes page libraries ldata)
+              [changes []])
+            all-parents (into all-parents parents-of-swapped)]
 
         (rx/of
          (dwu/start-undo-transaction undo-id)
@@ -1094,15 +1098,24 @@
             (when (seq (:redo-changes changes))
               (rx/of (dch/commit-changes changes)))
             (when-not (empty? updated-frames)
-              (rx/merge
-               (rx/of (ptk/data-event :layout/update {:ids (map :id updated-frames) :undo-group undo-group}))
-               (->> (rx/from updated-frames)
-                    (rx/mapcat
-                     (fn [shape]
-                       (rx/of
-                        (dwt/clear-thumbnail file-id (:page-id shape) (:id shape) "frame")
-                        (when-not (= (:frame-id shape) uuid/zero)
-                          (dwt/clear-thumbnail file-id (:page-id shape) (:frame-id shape) "frame"))))))))
+              (let [frames-by-page (->> updated-frames
+                                        (group-by :page-id))]
+                (rx/merge
+                 ;; Emit one layout/update event for each page
+                 (rx/from
+                  (map (fn [[page-id frames]]
+                         (ptk/data-event :layout/update
+                                         {:page-id page-id
+                                          :ids (map :id frames)
+                                          :undo-group undo-group}))
+                       frames-by-page))
+                 (->> (rx/from updated-frames)
+                      (rx/mapcat
+                       (fn [shape]
+                         (rx/of
+                          (dwt/clear-thumbnail file-id (:page-id shape) (:id shape) "frame")
+                          (when-not (= (:frame-id shape) uuid/zero)
+                            (dwt/clear-thumbnail file-id (:page-id shape) (:frame-id shape) "frame")))))))))
 
             (when (not= file-id library-id)
               ;; When we have just updated the library file, give some time for the

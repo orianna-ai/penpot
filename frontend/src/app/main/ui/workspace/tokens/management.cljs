@@ -2,6 +2,7 @@
   (:require-macros [app.main.style :as stl])
   (:require
    [app.common.data :as d]
+   [app.common.types.shape.layout :as ctsl]
    [app.common.types.token :as ctt]
    [app.common.types.tokens-lib :as ctob]
    [app.config :as cf]
@@ -34,7 +35,7 @@
         token-typography-types? (contains? cf/flags :token-typography-types)
         all-types (cond-> dwta/token-properties
                     (not token-units?) (dissoc :number)
-                    (not token-typography-types?) (remove-keys ctt/typography-keys))
+                    (not token-typography-types?) (remove-keys ctt/ff-typography-keys))
         all-types (-> all-types keys seq)]
     (loop [empty  #js []
            filled #js []
@@ -60,6 +61,10 @@
         selected-shapes
         (mf/with-memo [selected objects]
           (into [] (keep (d/getf objects)) selected))
+
+        is-selected-inside-layout
+        (mf/with-memo [selected-shapes objects]
+          (some #(ctsl/any-layout-immediate-child? objects %) selected-shapes))
 
         active-theme-tokens
         (mf/with-memo [tokens-lib]
@@ -148,6 +153,7 @@
                            :is-open (get open-status type false)
                            :type type
                            :selected-shapes selected-shapes
+                           :is-selected-inside-layout is-selected-inside-layout
                            :active-theme-tokens active-theme-tokens'
                            :tokens tokens}]))
 
@@ -155,5 +161,6 @@
        [:> token-group* {:key (name type)
                          :type type
                          :selected-shapes selected-shapes
+                         :is-selected-inside-layout :is-selected-inside-layout
                          :active-theme-tokens active-theme-tokens'
                          :tokens []}])]))

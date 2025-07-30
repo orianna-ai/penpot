@@ -1723,7 +1723,7 @@ msgid "inspect.attributes.typography.text-transform.none"
 msgstr "Ninguna"
 
 #: src/app/main/ui/inspect/attributes/text.cljs:155, src/app/main/ui/workspace/sidebar/options/menus/typography.cljs:430
-msgid "inspect.attributes.typography.text-transform.titlecase"
+msgid "inspect.attributes.typography.text-transform.capitalize"
 msgstr "Primera en mayúscula"
 
 #: src/app/main/ui/inspect/attributes/text.cljs:157
@@ -4340,16 +4340,11 @@ msgstr "Por favor, mejóralo para adaptarlo a tu uso. Contacta con el "
 msgid "subscription.dashboard.power-up.enterprise-plan"
 msgstr "Plan Enterprise"
 
-#: src/app/main/ui/dashboard/subscription.cljs:77
-#, unused
-msgid "subscription.dashboard.power-up.enterprise.description"
-msgstr "Seguridad avanzada, registros de actividad, asistencia dedicada y mucho más."
-
 #: src/app/main/ui/dashboard/subscription.cljs:60
 #, markdown
-msgid "subscription.dashboard.power-up.professional.bottom-description"
+msgid "subscription.dashboard.power-up.professional.bottom"
 msgstr ""
-"Consigue editores y almacenamiento adicionales, copias de seguridad de "
+"Consigue editores y almacenamiento adicionales, recuperación de "
 "archivos y mucho más con el Plan Unlimited[Mejóralo|target:self](%s)"
 
 #: src/app/main/ui/dashboard/subscription.cljs:59
@@ -4388,10 +4383,10 @@ msgstr "Plan Unlimited"
 
 #: src/app/main/ui/dashboard/subscription.cljs:74
 #, markdown
-msgid "subscription.dashboard.power-up.unlimited.bottom-description"
+msgid "subscription.dashboard.power-up.unlimited.bottom-text"
 msgstr ""
-"Obtenga seguridad avanzada, registros de actividad, asistencia dedicada y "
-"mucho más. Echa un ojo al[Plan Enterprise|target:self](%s)"
+"Consigue editores adicionales, copias de seguridad, almacenamiento ilimitado y mucho más. "
+"[Echa un ojo al Plan Enterprise|target:self](%s)"
 
 #: src/app/main/ui/dashboard/subscription.cljs:70
 #, unused
@@ -4442,16 +4437,15 @@ msgid "subscription.settings.enterprise-trial"
 msgstr "Enterprise (prueba)"
 
 #: src/app/main/ui/settings/subscription.cljs:271, src/app/main/ui/settings/subscription.cljs:320
-msgid "subscription.settings.enterprise.logs"
-msgstr "Registros de actividad"
+msgid "subscription.settings.enterprise.unlimited-storage"
+msgstr "Almacenamiento ilimitado y versiones de autoguardado de 90 días y recuperación de archivos"
 
-#: src/app/main/ui/settings/subscription.cljs:270, src/app/main/ui/settings/subscription.cljs:319
-msgid "subscription.settings.enterprise.security"
-msgstr "Seguridad avanzada"
+msgid "subscription.settings.enterprise.autosave"
+msgstr "Versiones guardadas automáticamente cada 90 días y recuperación de archivos"
 
 #: src/app/main/ui/settings/subscription.cljs:269, src/app/main/ui/settings/subscription.cljs:318
-msgid "subscription.settings.enterprise.support"
-msgstr "Apoyo específico"
+msgid "subscription.settings.enterprise.capped-bill"
+msgstr "Factura mensual limitada"
 
 #: src/app/main/ui/dashboard/subscription.cljs:114, src/app/main/ui/settings/subscription.cljs:251, src/app/main/ui/settings/subscription.cljs:262, src/app/main/ui/settings/subscription.cljs:272
 msgid "subscription.settings.manage-your-subscription"
@@ -4516,8 +4510,8 @@ msgid "subscription.settings.professional.projects-files"
 msgstr "Proyectos, archivos y borradores ilimitados"
 
 #: src/app/main/ui/settings/subscription.cljs:241, src/app/main/ui/settings/subscription.cljs:292
-msgid "subscription.settings.professional.storage"
-msgstr "10 GB de almacenamiento y versiones de autoguardado de 7 días"
+msgid "subscription.settings.professional.storage-autosave"
+msgstr "10 GB de almacenamiento y versiones de autoguardado de 7 días y recuperación de archivos"
 
 #: src/app/main/ui/settings/subscription.cljs:240, src/app/main/ui/settings/subscription.cljs:291
 msgid "subscription.settings.professional.teams-editors"
@@ -4560,11 +4554,6 @@ msgstr "Nos has estado apoyando con este plan desde: %s"
 msgid "subscription.settings.try-it-free"
 msgstr "Pruébalo gratis durante 14 días"
 
-#: src/app/main/ui/settings/subscription.cljs:119
-#, unused
-msgid "subscription.settings.ulimited.try-it-free"
-msgstr "Pruébalo gratis durante 14 días"
-
 #: src/app/main/ui/dashboard/subscription.cljs:108, src/app/main/ui/settings/subscription.cljs:56, src/app/main/ui/settings/subscription.cljs:256, src/app/main/ui/settings/subscription.cljs:299
 msgid "subscription.settings.unlimited"
 msgstr "Unlimited"
@@ -4578,10 +4567,10 @@ msgid "subscription.settings.unlimited.bill"
 msgstr "Factura mensual limitada"
 
 #: src/app/main/ui/settings/subscription.cljs:250, src/app/main/ui/settings/subscription.cljs:261, src/app/main/ui/settings/subscription.cljs:306
-msgid "subscription.settings.unlimited.storage"
+msgid "subscription.settings.unlimited.storage-autosave"
 msgstr ""
-"25 GB de almacenamiento y 30 días de autoguardado de versiones y copias de "
-"seguridad de archivos"
+"25 GB de almacenamiento y 30 días de autoguardado de versiones y recuperación "
+"de archivos"
 
 #: src/app/main/ui/settings/subscription.cljs:248, src/app/main/ui/settings/subscription.cljs:259, src/app/main/ui/settings/subscription.cljs:304
 msgid "subscription.settings.unlimited.teams"
@@ -6986,6 +6975,10 @@ msgstr "Eliminar layout"
 msgid "workspace.shape.menu.remove-variant-property"
 msgstr "Eliminar propiedad"
 
+#: src/app/main/ui/workspace/sidebar/options/menus/component.cljs:974
+msgid "workspace.shape.menu.remove-variant-property.last-property"
+msgstr "La variante debe tener al menos una propiedad"
+
 #: src/app/main/ui/workspace/context_menu.cljs:318
 msgid "workspace.shape.menu.rename"
 msgstr "Renombrar"
@@ -7231,6 +7224,10 @@ msgstr "Múltiples ficheros"
 #: src/app/main/ui/workspace/tokens/modals/export.cljs:36
 msgid "workspace.tokens.export.no-tokens-themes-sets"
 msgstr "No existen tokens, temas o sets para exportar."
+
+#: src/app/main/ui/workspace/tokens/management/create/form.cljs:602
+msgid "workspace.tokens.text-case-value-enter"
+msgstr "Introduce una capitalización: none | Uppercase | Lowercase | Capitalize"
 
 #: src/app/main/ui/workspace/tokens/modals/export.cljs:33
 msgid "workspace.tokens.export.preview"
@@ -7484,7 +7481,7 @@ msgstr "Herramientas"
 
 #: src/app/main/data/workspace/tokens/import_export.cljs:45
 msgid "workspace.tokens.unknown-token-type-message"
-msgstr "La importación se ha realizado correctamente. Es posible que no se incluyan algunos tokens."
+msgstr "La importación se ha realizado correctamente. Algunos tokens no se incluyeron."
 
 #: src/app/main/data/workspace/tokens/import_export.cljs:47
 msgid "workspace.tokens.unknown-token-type-section"
@@ -7816,6 +7813,7 @@ msgstr ""
 "Si quieres aumentar este límite, "
 "[mejora tu plan|target:self](%s)"
 
+#, markdown
 msgid "subscription.workspace.versions.warning.enterprise.subtext-owner"
 msgstr ""
 "Si quieres aumentar este límite, escríbenos a "

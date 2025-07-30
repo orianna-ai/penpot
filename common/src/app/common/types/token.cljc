@@ -10,6 +10,7 @@
    [app.common.schema :as sm]
    [clojure.data :as data]
    [clojure.set :as set]
+   [cuerdas.core :as str]
    [malli.util :as mu]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -29,20 +30,22 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (def token-type->dtcg-token-type
-  {:boolean       "boolean"
-   :border-radius "borderRadius"
-   :color         "color"
-   :dimensions    "dimension"
-   :font-size     "fontSizes"
+  {:boolean        "boolean"
+   :border-radius  "borderRadius"
+   :color          "color"
+   :dimensions     "dimension"
+   :font-family    "fontFamilies"
+   :font-size      "fontSizes"
    :letter-spacing "letterSpacing"
-   :number        "number"
-   :opacity       "opacity"
-   :other         "other"
-   :rotation      "rotation"
-   :sizing        "sizing"
-   :spacing       "spacing"
-   :string        "string"
-   :stroke-width  "strokeWidth"})
+   :text-case      "textCase"
+   :number         "number"
+   :opacity        "opacity"
+   :other          "other"
+   :rotation       "rotation"
+   :sizing         "sizing"
+   :spacing        "spacing"
+   :string         "string"
+   :stroke-width   "strokeWidth"})
 
 (def dtcg-token-type->token-type
   (set/map-invert token-type->dtcg-token-type))
@@ -92,18 +95,31 @@
 
 (def opacity-keys (schema-keys schema:opacity))
 
-(def ^:private schema:spacing
+(def ^:private schema:spacing-gap
   [:map
    [:row-gap {:optional true} token-name-ref]
-   [:column-gap {:optional true} token-name-ref]
+   [:column-gap {:optional true} token-name-ref]])
+
+(def ^:private schema:spacing-padding
+  [:map
    [:p1 {:optional true} token-name-ref]
    [:p2 {:optional true} token-name-ref]
    [:p3 {:optional true} token-name-ref]
-   [:p4 {:optional true} token-name-ref]
+   [:p4 {:optional true} token-name-ref]])
+
+(def ^:private schema:spacing-margin
+  [:map
    [:m1 {:optional true} token-name-ref]
    [:m2 {:optional true} token-name-ref]
    [:m3 {:optional true} token-name-ref]
    [:m4 {:optional true} token-name-ref]])
+
+(def ^:private schema:spacing
+  (reduce mu/union [schema:spacing-gap
+                    schema:spacing-padding
+                    schema:spacing-margin]))
+
+(def spacing-margin-keys (schema-keys schema:spacing-margin))
 
 (def spacing-keys (schema-keys schema:spacing))
 
@@ -114,6 +130,15 @@
                     schema:border-radius]))
 
 (def dimensions-keys (schema-keys schema:dimensions))
+
+(def ^:private schema:axis
+  [:map
+   [:x {:optional true} token-name-ref]
+   [:y {:optional true} token-name-ref]])
+
+(def axis-keys (schema-keys schema:axis))
+
+
 
 (def ^:private schema:rotation
   [:map
@@ -133,7 +158,26 @@
 
 (def letter-spacing-keys (schema-keys schema:letter-spacing))
 
-(def typography-keys (set/union font-size-keys letter-spacing-keys))
+(def ^:private schema:font-family
+  [:map
+   [:font-family {:optional true} token-name-ref]])
+
+(def font-family-keys (schema-keys schema:font-family))
+
+(def ^:private schema:text-case
+  [:map
+   [:text-case {:optional true} token-name-ref]])
+
+(def text-case-keys (schema-keys schema:text-case))
+
+(def typography-keys (set/union font-size-keys
+                                letter-spacing-keys
+                                font-family-keys
+                                text-case-keys))
+
+;; TODO: Created to extract the font-size feature from the typography feature flag.
+;; Delete this once the typography feature flag is removed.
+(def ff-typography-keys (set/difference typography-keys font-size-keys))
 
 (def ^:private schema:number
   (reduce mu/union [[:map [:line-height {:optional true} token-name-ref]]
@@ -148,6 +192,7 @@
                          opacity-keys
                          spacing-keys
                          dimensions-keys
+                         axis-keys
                          rotation-keys
                          typography-keys
                          number-keys))
@@ -165,6 +210,8 @@
    schema:number
    schema:font-size
    schema:letter-spacing
+   schema:font-family
+   schema:text-case
    schema:dimensions])
 
 (defn shape-attr->token-attrs
@@ -194,12 +241,15 @@
 
      (font-size-keys shape-attr) #{shape-attr}
      (letter-spacing-keys shape-attr) #{shape-attr}
+     (font-family-keys shape-attr) #{shape-attr}
+     (text-case-keys shape-attr) #{shape-attr}
      (border-radius-keys shape-attr) #{shape-attr}
      (sizing-keys shape-attr) #{shape-attr}
      (opacity-keys shape-attr) #{shape-attr}
      (spacing-keys shape-attr) #{shape-attr}
      (rotation-keys shape-attr) #{shape-attr}
-     (number-keys shape-attr) #{shape-attr})))
+     (number-keys shape-attr) #{shape-attr}
+     (axis-keys shape-attr) #{shape-attr})))
 
 (defn token-attr->shape-attr
   [token-attr]
@@ -259,6 +309,13 @@
   [attributes token-type]
   (seq (appliable-attrs attributes token-type)))
 
+;; Token attrs that are set inside content blocks of text shapes, instead
+;; at the shape level.
+(def attrs-in-text-content
+  (set/union
+   typography-keys
+   #{:fill}))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; TOKENS IN SHAPES
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -287,3 +344,23 @@
 
 (defn unapply-token-id [shape attributes]
   (update shape :applied-tokens d/without-keys attributes))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; TYPOGRAPHY
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defn split-font-family
+  "Splits font family `value` string from into vector of font families.
+
+  Doesn't handle possible edge-case of font-families with `,` in their font family name."
+  [font-value]
+  (let [families (str/split font-value ",")
+        xform (comp
+               (map str/trim)
+               (remove str/empty?))]
+    (into [] xform families)))
+
+(defn join-font-family
+  "Joins font family `value` into a string to be edited with a single input."
+  [font-families]
+  (str/join ", " font-families))

@@ -48,6 +48,7 @@ use crate::state::ShapesPool;
 
 const MIN_VISIBLE_SIZE: f32 = 2.0;
 const ANTIALIAS_THRESHOLD: f32 = 15.0;
+const MIN_STROKE_WIDTH: f32 = 0.001;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
@@ -550,8 +551,10 @@ impl Shape {
         self.fills.clear();
     }
 
-    pub fn strokes(&self) -> std::slice::Iter<Stroke> {
-        self.strokes.iter()
+    pub fn visible_strokes(&self) -> impl DoubleEndedIterator<Item = &Stroke> {
+        self.strokes
+            .iter()
+            .filter(|stroke| stroke.width > MIN_STROKE_WIDTH)
     }
 
     pub fn add_stroke(&mut self, s: Stroke) {
@@ -705,6 +708,7 @@ impl Shape {
             };
             max_stroke = max_stroke.max(width);
         }
+
         let mut rect = if let Some(path) = self.get_skia_path() {
             path.compute_tight_bounds()
                 .with_outset((max_stroke, max_stroke))
@@ -719,6 +723,12 @@ impl Shape {
             bounds_rect.join(stroke_rect);
             bounds_rect
         };
+
+        if let Type::Text(ref text_content) = self.shape_type {
+            let (width, height) = text_content.visual_bounds();
+            rect.right = rect.left + width;
+            rect.bottom = rect.top + height;
+        }
 
         for shadow in self.shadows.iter() {
             let (x, y) = shadow.offset;
@@ -966,10 +976,13 @@ impl Shape {
         !self.fills.is_empty()
     }
 
-    pub fn has_inner_strokes(&self) -> bool {
-        self.strokes.iter().any(|s| s.kind == StrokeKind::Inner)
+    pub fn has_visible_strokes(&self) -> bool {
+        self.visible_strokes().next().is_some()
     }
 
+    pub fn has_visible_inner_strokes(&self) -> bool {
+        self.visible_strokes().any(|s| s.kind == StrokeKind::Inner)
+    }
     /*
       Returns the list of children taking into account the structure modifiers
     */

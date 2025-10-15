@@ -1,18 +1,19 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-pub mod common;
+
 mod constraints;
 mod flex_layout;
+
+pub mod common;
 pub mod grid_layout;
 
+use crate::math::{self as math, bools, identitish, Bounds, Matrix, Point};
 use common::GetBounds;
 
-use crate::math::{self as math, identitish, Bounds, Matrix, Point};
 use crate::shapes::{
-    auto_height, set_paragraphs_width, ConstraintH, ConstraintV, Frame, Group, GrowType, Layout,
-    Modifier, Shape, StructureEntry, TransformEntry, Type,
+    ConstraintH, ConstraintV, Frame, Group, GrowType, Layout, Modifier, Shape, StructureEntry,
+    TransformEntry, Type,
 };
-use crate::state::ShapesPool;
-use crate::state::State;
+use crate::state::{ShapesPool, State};
 use crate::uuid::Uuid;
 
 #[allow(clippy::too_many_arguments)]
@@ -28,7 +29,7 @@ fn propagate_children(
 ) -> VecDeque<Modifier> {
     let children_ids = shape.modified_children_ids(structure.get(&shape.id), true);
 
-    if children_ids.is_empty() || identitish(transform) {
+    if children_ids.is_empty() || identitish(&transform) {
         return VecDeque::new();
     }
 
@@ -109,6 +110,31 @@ fn calculate_group_bounds(
     shape_bounds.with_points(result)
 }
 
+fn calculate_bool_bounds(
+    shape: &Shape,
+    shapes: &ShapesPool,
+    bounds: &HashMap<Uuid, Bounds>,
+    modifiers: &HashMap<Uuid, Matrix>,
+    structure: &HashMap<Uuid, Vec<StructureEntry>>,
+) -> Option<Bounds> {
+    let shape_bounds = bounds.find(shape);
+    let children_ids = shape.modified_children_ids(structure.get(&shape.id), true);
+
+    let Type::Bool(bool_data) = &shape.shape_type else {
+        return Some(shape_bounds);
+    };
+
+    let path = bools::bool_from_shapes(
+        bool_data.bool_type,
+        &children_ids,
+        shapes,
+        modifiers,
+        structure,
+    );
+
+    Some(path.bounds())
+}
+
 fn set_pixel_precision(transform: &mut Matrix, bounds: &mut Bounds) {
     let tr = bounds.transform_matrix().unwrap_or_default();
     let tr_inv = tr.invert().unwrap_or_default();
@@ -169,19 +195,33 @@ fn propagate_transform(
 
     let mut transform = entry.transform;
 
-    if let Type::Text(content) = &shape.shape_type {
-        if content.grow_type() == GrowType::AutoHeight {
-            let mut paragraphs = content.get_skia_paragraphs();
-            set_paragraphs_width(shape_bounds_after.width(), &mut paragraphs);
-            let height = auto_height(&mut paragraphs, shape_bounds_after.width());
-            let resize_transform = math::resize_matrix(
-                &shape_bounds_after,
-                &shape_bounds_after,
-                shape_bounds_after.width(),
-                height,
-            );
-            shape_bounds_after = shape_bounds_after.transform(&resize_transform);
-            transform.post_concat(&resize_transform);
+    // NOTA: No puedo utilizar un clone porque entonces estaríamos
+    // perdiendo la referencia al contenido del layout...
+    if let Type::Text(text_content) = &mut shape.shape_type.clone() {
+        if text_content.needs_update_layout() {
+            text_content.update_layout(shape.selrect);
+        }
+        match text_content.grow_type() {
+            GrowType::AutoHeight => {
+                let height = text_content.size.height;
+                let resize_transform = math::resize_matrix(
+                    &shape_bounds_after,
+                    &shape_bounds_after,
+                    shape_bounds_after.width(),
+                    height,
+                );
+                shape_bounds_after = shape_bounds_after.transform(&resize_transform);
+                transform.post_concat(&resize_transform);
+            }
+            GrowType::AutoWidth => {
+                let width = text_content.width();
+                let height = text_content.size.height;
+                let resize_transform =
+                    math::resize_matrix(&shape_bounds_after, &shape_bounds_after, width, height);
+                shape_bounds_after = shape_bounds_after.transform(&resize_transform);
+                transform.post_concat(&resize_transform);
+            }
+            GrowType::Fixed => {}
         }
     }
 
@@ -227,6 +267,7 @@ fn propagate_reflow(
     bounds: &mut HashMap<Uuid, Bounds>,
     layout_reflows: &mut Vec<Uuid>,
     reflown: &mut HashSet<Uuid>,
+    modifiers: &HashMap<Uuid, Matrix>,
 ) {
     let Some(shape) = state.shapes.get(id) else {
         return;
@@ -278,11 +319,8 @@ fn propagate_reflow(
             }
         }
         Type::Bool(_) => {
-            // TODO: How to calculate from rust the new box? we need to calculate the
-            // new path... impossible right now. I'm going to use for the moment the group
-            // calculation
             if let Some(shape_bounds) =
-                calculate_group_bounds(shape, shapes, bounds, &state.structure)
+                calculate_bool_bounds(shape, shapes, bounds, modifiers, &state.structure)
             {
                 bounds.insert(shape.id, shape_bounds);
                 reflow_parent = true;
@@ -391,6 +429,7 @@ pub fn propagate_modifiers(
                     &mut bounds,
                     &mut layout_reflows,
                     &mut reflown,
+                    &modifiers,
                 ),
             }
         }

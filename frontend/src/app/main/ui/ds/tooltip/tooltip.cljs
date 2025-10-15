@@ -154,12 +154,13 @@
   the dom with the result."
   [tooltip placement origin-brect offset]
   (show-popover tooltip)
-  (let [tooltip-brect (dom/get-bounding-rect tooltip)
+  (let [saved-height (dom/get-data tooltip "height")
+        saved-width (dom/get-data tooltip "width")
+        tooltip-brect (dom/get-bounding-rect tooltip)
+        tooltip-brect (assoc tooltip-brect :height (or saved-height (:height tooltip-brect)) :width (or saved-width (:width tooltip-brect)))
         window-size   (dom/get-window-size)]
     (when-let [[placement placement-rect] (find-matching-placement placement tooltip-brect origin-brect window-size offset)]
-      (let [height (if (or (= placement "right") (= placement "left"))
-                     (- (:height placement-rect) arrow-height)
-                     (:height placement-rect))]
+      (let [height (:height placement-rect)]
         (dom/set-css-property! tooltip "block-size" (dm/str height "px"))
         (dom/set-css-property! tooltip "inset-block-start" (dm/str (:top placement-rect) "px"))
         (dom/set-css-property! tooltip "inset-inline-start" (dm/str (:left placement-rect) "px")))
@@ -171,7 +172,7 @@
    [:id {:optional true} :string]
    [:offset {:optional true} :int]
    [:delay {:optional true} :int]
-   [:content [:or fn? :string [:fn mf/element?]]]
+   [:content [:or fn? :string]]
    [:placement {:optional true}
     [:maybe [:enum "top" "bottom" "left" "right" "top-right" "bottom-right" "bottom-left" "top-left"]]]])
 
@@ -248,7 +249,7 @@
                           :on-focus on-show
                           :on-blur on-hide
                           :on-key-down handle-key-down
-                          :class (stl/css :tooltip-trigger)
+                          :class [class (stl/css :tooltip-trigger)]
                           :aria-describedby id})
         content
         (if (fn? content)
@@ -257,7 +258,7 @@
 
     [:> :div props
      children
-     [:div {:class [class (stl/css :tooltip)]
+     [:div {:class (stl/css :tooltip)
             :id id
             :popover "auto"
             :role "tooltip"}

@@ -15,6 +15,7 @@
    [app.common.pprint :as pp]
    [app.common.schema :as sm]
    [app.common.spec :as us]
+   [app.common.time :as ct]
    [app.common.transit :as tr]
    [app.common.uuid :as uuid]
    [app.config :as cf]
@@ -33,7 +34,6 @@
    [app.rpc.helpers :as rph]
    [app.util.blob :as blob]
    [app.util.services :as sv]
-   [app.util.time :as dt]
    [app.worker :as wrk]
    [app.worker.runner]
    [clojure.java.io :as io]
@@ -62,7 +62,8 @@
 (def default
   {:database-uri "postgresql://postgres/penpot_test"
    :redis-uri "redis://redis/1"
-   :auto-file-snapshot-every 1})
+   :auto-file-snapshot-every 1
+   :file-data-backend "db"})
 
 (def config
   (cf/read-config :prefix "penpot-test"
@@ -74,9 +75,6 @@
    :enable-smtp
    :enable-quotes
    :enable-rpc-climit
-   :enable-feature-fdata-pointer-map
-   :enable-feature-fdata-objets-map
-   :enable-feature-components-v2
    :enable-auto-file-snapshot
    :disable-file-validation])
 
@@ -99,7 +97,7 @@
                       :thumbnail-uri "test"
                       :path (-> "backend_tests/test_files/template.penpot" io/resource fs/path)}]
           system (-> (merge main/system-config main/worker-config)
-                     (assoc-in [:app.redis/redis :app.redis/uri] (:redis-uri config))
+                     (assoc-in [:app.redis/client :app.redis/uri] (:redis-uri config))
                      (assoc-in [::db/pool ::db/uri] (:database-uri config))
                      (assoc-in [::db/pool ::db/username] (:database-username config))
                      (assoc-in [::db/pool ::db/password] (:database-password config))
@@ -113,7 +111,6 @@
                              :app.auth.oidc.providers/generic
                              :app.setup/templates
                              :app.auth.oidc/routes
-                             :app.worker/monitor
                              :app.http.oauth/handler
                              :app.notifications/handler
                              :app.loggers.mattermost/reporter
@@ -263,7 +260,7 @@
   (dm/with-open [conn (db/open system)]
     (db/insert! conn :profile-complaint-report
                 {:profile-id id
-                 :created-at (or created-at (dt/now))
+                 :created-at (or created-at (ct/now))
                  :type (name type)
                  :content (db/tjson {})})))
 
@@ -273,7 +270,7 @@
     (db/insert! conn :global-complaint-report
                 {:email email
                  :type (name type)
-                 :created-at (or created-at (dt/now))
+                 :created-at (or created-at (ct/now))
                  :content (db/tjson {})})))
 
 (defn create-team-role*
@@ -305,7 +302,7 @@
   ([system {:keys [file-id changes session-id profile-id revn]
             :or {session-id (uuid/next) revn 0}}]
    (-> system
-       (assoc ::files.update/timestamp (dt/now))
+       (assoc ::files.update/timestamp (ct/now))
        (db/tx-run! (fn [{:keys [::db/conn] :as system}]
                      (let [file (files.update/get-file conn file-id)]
                        (#'files.update/update-file* system
@@ -379,7 +376,7 @@
     ;; (app.common.pprint/pprint (:app.rpc/methods *system*))
     (try-on! (method-fn (-> data
                             (dissoc ::type)
-                            (assoc :app.rpc/request-at (dt/now)))))))
+                            (assoc :app.rpc/request-at (ct/now)))))))
 
 (defn run-task!
   ([name]
@@ -525,7 +522,7 @@
 
 (defn sleep
   [ms-or-duration]
-  (Thread/sleep (inst-ms (dt/duration ms-or-duration))))
+  (Thread/sleep (inst-ms (ct/duration ms-or-duration))))
 
 (defn config-get-mock
   [data]

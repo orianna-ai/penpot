@@ -16,7 +16,7 @@
    [app.common.geom.shapes.tree-seq :as gsts]
    [app.common.logging :as l]
    [app.common.schema :as sm]
-   [app.common.time :as dt]
+   [app.common.time :as ct]
    [app.common.types.color :as ctc]
    [app.common.types.component :as ctk]
    [app.common.types.components-list :as ctkl]
@@ -34,7 +34,6 @@
    [app.common.uuid :as uuid]
    [cuerdas.core :as str]))
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; CONSTANTS
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -49,8 +48,8 @@
   "A schema that represents the file media object"
   [:map {:title "FileMedia"}
    [:id ::sm/uuid]
-   [:created-at {:optional true} ::sm/inst]
-   [:deleted-at {:optional true} ::sm/inst]
+   [:created-at {:optional true} ::ct/inst]
+   [:deleted-at {:optional true} ::ct/inst]
    [:name :string]
    [:width ::sm/safe-int]
    [:height ::sm/safe-int]
@@ -96,9 +95,9 @@
    [:name :string]
    [:revn :int]
    [:vern {:optional true} :int]
-   [:created-at ::sm/inst]
-   [:modified-at ::sm/inst]
-   [:deleted-at {:optional true} ::sm/inst]
+   [:created-at ::ct/inst]
+   [:modified-at ::ct/inst]
+   [:deleted-at {:optional true} ::ct/inst]
    [:project-id {:optional true} ::sm/uuid]
    [:team-id {:optional true} ::sm/uuid]
    [:is-shared {:optional true} ::sm/boolean]
@@ -107,19 +106,18 @@
    [:version :int]
    [:features ::cfeat/features]
    [:migrations {:optional true}
-    [::sm/set :string]]])
+    [::sm/set {:ordered true} :string]]])
 
 (sm/register! ::data schema:data)
 (sm/register! ::file schema:file)
-(sm/register! ::media schema:media)
 (sm/register! ::colors schema:colors)
 (sm/register! ::typographies schema:typographies)
 
 (def check-file
-  (sm/check-fn schema:file :hint "check error on validating file"))
+  (sm/check-fn schema:file :hint "invalid file"))
 
 (def check-file-data
-  (sm/check-fn schema:data))
+  (sm/check-fn schema:data :hint "invalid file data"))
 
 (def check-file-media
   (sm/check-fn schema:media))
@@ -157,14 +155,14 @@
 
 (defn make-file
   [{:keys [id project-id name revn is-shared features migrations
-           ignore-sync-until created-at modified-at deleted-at]
+           metadata backend ignore-sync-until created-at modified-at deleted-at]
     :as params}
 
    & {:keys [create-page with-data page-id]
       :or {create-page true with-data true}}]
 
   (let [id          (or id (uuid/next))
-        created-at  (or created-at (dt/now))
+        created-at  (or created-at (ct/now))
         modified-at (or modified-at created-at)
         features    (d/nilv features #{})
 
@@ -188,8 +186,9 @@
           :data data
           :features features
           :migrations migrations
+          :metadata metadata
+          :backend backend
           :ignore-sync-until ignore-sync-until
-          :has-media-trimmed false
           :created-at created-at
           :modified-at modified-at
           :deleted-at deleted-at})]

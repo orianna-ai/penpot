@@ -13,11 +13,11 @@
    [app.common.json :as json]
    [app.common.logging :as l]
    [app.common.schema :as sm]
+   [app.common.time :as ct]
    [app.common.transit :as t]
    [app.common.uuid :as uuid]
    [app.db.sql :as sql]
    [app.metrics :as mtx]
-   [app.util.time :as dt]
    [clojure.java.io :as io]
    [clojure.set :as set]
    [integrant.core :as ig]
@@ -298,7 +298,7 @@
 (defn insert!
   "A helper that builds an insert sql statement and executes it. By
   default returns the inserted row with all the field; you can delimit
-  the returned columns with the `::columns` option."
+  the returned columns with the `::sql/columns` option."
   [ds table params & {:as opts}]
   (let [conn (get-connectable ds)
         sql  (sql/insert table params opts)
@@ -379,9 +379,7 @@
 
 (defn is-row-deleted?
   [{:keys [deleted-at]}]
-  (and (dt/instant? deleted-at)
-       (< (inst-ms deleted-at)
-          (inst-ms (dt/now)))))
+  (some? deleted-at))
 
 (defn get*
   "Retrieve a single row from database that matches a simple filters. Do
@@ -406,15 +404,15 @@
                 :hint "database object not found"))
     row))
 
-
 (defn get-with-sql
   [ds sql & {:as opts}]
-  (let [rows (cond->> (exec! ds sql opts)
-               (::remove-deleted opts true)
-               (remove is-row-deleted?)
+  (let [rows
+        (cond->> (exec! ds sql opts)
+          (::remove-deleted opts true)
+          (remove is-row-deleted?)
 
-               :always
-               (not-empty))]
+          :always
+          (not-empty))]
 
     (when (and (not rows) (::throw-if-not-exists opts true))
       (ex/raise :type :not-found
@@ -422,7 +420,6 @@
                 :hint "database object not found"))
 
     (first rows)))
-
 
 (def ^:private default-plan-opts
   (-> default-opts
@@ -578,10 +575,10 @@
   [system f & params]
   (cond
     (connection? system)
-    (run! {::conn system} f)
+    (apply run! {::conn system} f params)
 
     (pool? system)
-    (run! {::pool system} f)
+    (apply run! {::pool system} f params)
 
     (::conn system)
     (apply f system params)
@@ -605,7 +602,7 @@
     (string? o)
     (pginterval o)
 
-    (dt/duration? o)
+    (ct/duration? o)
     (interval (inst-ms o))
 
     :else

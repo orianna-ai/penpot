@@ -12,6 +12,7 @@
    [app.common.logging :as l]
    [app.common.schema :as sm]
    [app.common.spec :as us]
+   [app.common.time :as ct]
    [app.config :as cf]
    [app.db :as db]
    [app.http :as-alias http]
@@ -22,6 +23,7 @@
    [app.main :as-alias main]
    [app.metrics :as mtx]
    [app.msgbus :as-alias mbus]
+   [app.redis :as rds]
    [app.rpc.climit :as climit]
    [app.rpc.cond :as cond]
    [app.rpc.helpers :as rph]
@@ -31,7 +33,6 @@
    [app.storage :as-alias sto]
    [app.util.inet :as inet]
    [app.util.services :as sv]
-   [app.util.time :as dt]
    [clojure.spec.alpha :as s]
    [cuerdas.core :as str]
    [integrant.core :as ig]
@@ -103,7 +104,7 @@
         data         (-> params
                          (assoc ::handler-name handler-name)
                          (assoc ::ip-addr ip-addr)
-                         (assoc ::request-at (dt/now))
+                         (assoc ::request-at (ct/now))
                          (assoc ::external-session-id session-id)
                          (assoc ::external-event-origin event-origin)
                          (assoc ::session/id (::session/id request))
@@ -130,7 +131,7 @@
   [{:keys [::mtx/metrics ::metrics-id]} f mdata]
   (let [labels (into-array String [(::sv/name mdata)])]
     (fn [cfg params]
-      (let [tp (dt/tpoint)]
+      (let [tp (ct/tpoint)]
         (try
           (f cfg params)
           (finally
@@ -239,7 +240,6 @@
           'app.rpc.commands.files
           'app.rpc.commands.files-create
           'app.rpc.commands.files-share
-          'app.rpc.commands.files-temp
           'app.rpc.commands.files-update
           'app.rpc.commands.files-snapshot
           'app.rpc.commands.files-thumbnails
@@ -262,6 +262,7 @@
    ::session/manager
    ::http.client/client
    ::db/pool
+   ::rds/pool
    ::mbus/msgbus
    ::sto/storage
    ::mtx/metrics

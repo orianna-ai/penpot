@@ -3,7 +3,7 @@ LABEL maintainer="Penpot <docker@penpot.app>"
 
 ENV LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
-    NODE_VERSION=v22.16.0 \
+    NODE_VERSION=v22.19.0 \
     DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/node/bin:$PATH
 
@@ -39,6 +39,7 @@ RUN set -ex; \
       fonts-wqy-zenhei \
       fonts-tlwg-loma-otf \
       fonts-freefont-ttf \
+      poppler-utils \
       \
       libasound2t64 \
       libatk-bridge2.0-0t64 \
@@ -88,7 +89,8 @@ RUN set -eux; \
     mkdir -p /opt/penpot; \
     chown -R penpot:penpot /opt/penpot;
 
-ADD --chown=penpot:penpot ./bundle-exporter/ /opt/penpot/exporter
+ARG BUNDLE_PATH="./bundle-exporter/"
+COPY --chown=penpot:penpot $BUNDLE_PATH /opt/penpot/exporter/
 
 WORKDIR /opt/penpot/exporter
 USER penpot:penpot

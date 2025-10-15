@@ -9,12 +9,14 @@
   (:require
    [app.common.data :as d]
    [app.common.data.macros :as dm]
-   [app.common.types.color :as clr]
+   [app.common.types.stroke :as cts]
    [app.main.data.workspace :as udw]
    [app.main.data.workspace.colors :as dc]
+   [app.main.data.workspace.tokens.application :as dwta]
    [app.main.store :as st]
-   [app.main.ui.components.title-bar :refer [title-bar]]
+   [app.main.ui.components.title-bar :refer [title-bar*]]
    [app.main.ui.ds.buttons.icon-button :refer [icon-button*]]
+   [app.main.ui.ds.foundations.assets.icon :as i]
    [app.main.ui.hooks :as h]
    [app.main.ui.workspace.sidebar.options.rows.stroke-row :refer [stroke-row]]
    [app.util.dom :as dom]
@@ -36,12 +38,12 @@
    :stroke-cap-end])
 
 (mf/defc stroke-menu
-  {::mf/wrap [#(mf/memo' % (mf/check-props ["ids" "values" "type" "show-caps"]))]}
-  [{:keys [ids type values show-caps disable-stroke-style] :as props}]
+  {::mf/wrap [#(mf/memo' % (mf/check-props ["ids" "values" "type" "show-caps" "applied-tokens" "shapes" "objects"]))]}
+  [{:keys [ids type values show-caps disable-stroke-style applied-tokens shapes objects] :as props}]
   (let [label (case type
                 :multiple (tr "workspace.options.selection-stroke")
                 :group (tr "workspace.options.group-stroke")
-                (tr "workspace.options.stroke"))
+                (tr "labels.stroke"))
 
         state*          (mf/use-state true)
         open?           (deref state*)
@@ -157,11 +159,7 @@
         on-add-stroke
         (fn [_]
           (st/emit! (udw/trigger-bounding-box-cloaking ids))
-          (st/emit! (dc/add-stroke ids {:stroke-alignment :inner
-                                        :stroke-style :solid
-                                        :stroke-color clr/black
-                                        :stroke-opacity 1
-                                        :stroke-width 1}))
+          (st/emit! (dc/add-stroke ids cts/default-stroke))
           (when (not (some? (seq strokes))) (open-content)))
 
         disable-drag    (mf/use-state false)
@@ -170,20 +168,27 @@
                    (reset! disable-drag true))
 
         on-blur (fn [_]
-                  (reset! disable-drag false))]
+                  (reset! disable-drag false))
+        on-detach-token
+        (mf/use-fn
+         (mf/deps ids)
+         (fn [token attrs]
+           (st/emit! (dwta/unapply-token {:attributes attrs
+                                          :token token
+                                          :shape-ids ids}))))]
 
     [:div {:class (stl/css :element-set)}
      [:div {:class (stl/css :element-title)}
-      [:& title-bar {:collapsable  has-strokes?
-                     :collapsed    (not open?)
-                     :on-collapsed toggle-content
-                     :title        label
-                     :class        (stl/css-case :title-spacing-stroke (not has-strokes?))}
+      [:> title-bar* {:collapsable  has-strokes?
+                      :collapsed    (not open?)
+                      :on-collapsed toggle-content
+                      :title        label
+                      :class        (stl/css-case :title-spacing-stroke (not has-strokes?))}
        (when (not (= :multiple strokes))
          [:> icon-button* {:variant "ghost"
                            :aria-label (tr "workspace.options.stroke.add-stroke")
                            :on-click on-add-stroke
-                           :icon "add"
+                           :icon i/add
                            :data-testid "add-stroke"}])]]
      (when open?
        [:div {:class (stl/css-case :element-content true
@@ -196,14 +201,16 @@
            [:> icon-button* {:variant "ghost"
                              :aria-label (tr "workspace.options.stroke.remove-stroke")
                              :on-click handle-remove-all
-                             :icon "remove"}]]
+                             :icon i/remove}]]
           (seq strokes)
-          [:& h/sortable-container {}
+          [:> h/sortable-container* {}
            (for [[index value] (d/enumerate (:strokes values []))]
              [:& stroke-row {:key (dm/str "stroke-" index)
                              :stroke value
                              :title (tr "workspace.options.stroke-color")
                              :index index
+                             :shapes shapes
+                             :objects objects
                              :show-caps show-caps
                              :on-color-change on-color-change
                              :on-color-detach on-color-detach
@@ -215,6 +222,8 @@
                              :on-stroke-cap-start-change on-stroke-cap-start-change
                              :on-stroke-cap-end-change on-stroke-cap-end-change
                              :on-stroke-cap-switch on-stroke-cap-switch
+                             :applied-tokens applied-tokens
+                             :on-detach-token on-detach-token
                              :on-remove on-remove
                              :on-reorder (handle-reorder index)
                              :disable-drag disable-drag

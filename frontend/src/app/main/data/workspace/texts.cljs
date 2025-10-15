@@ -58,13 +58,13 @@
   ([{:keys [id points selrect] :as shape} content]
    (wasm.api/use-shape id)
    (wasm.api/set-shape-text id content)
-   (let [dimension (wasm.api/text-dimensions)
-         resize-v
-         (gpt/point
-          (/ (:width dimension) (-> selrect :width))
-          (/ (:height dimension) (-> selrect :height)))
+   (let [dimension (wasm.api/get-text-dimensions)
+         resize-v  (gpt/point
+                    (/ (:width dimension) (-> selrect :width))
+                    (/ (:height dimension) (-> selrect :height)))
 
-         origin (first points)]
+         origin    (first points)]
+
      {id
       {:modifiers
        (ctm/resize-modifiers
@@ -106,8 +106,10 @@
   (ptk/reify ::focus-editor
     ptk/EffectEvent
     (effect [_ state _]
-      (when-let [editor (:workspace-editor state)]
-        (ts/schedule #(.focus ^js editor))))))
+      (let [editor (:workspace-editor state)
+            element (when editor (.-element editor))]
+        (when (and element (.-focus element))
+          (ts/schedule #(.focus ^js element)))))))
 
 (defn gen-name
   [editor]
@@ -420,8 +422,9 @@
                 (txt/update-text-content shape txt/is-root-node? d/txt-merge attrs)
                 (assoc shape :content (d/txt-merge {:type "root"} attrs))))
 
-            shape-ids (cond (cfh/text-shape? shape)  [id]
-                            (cfh/group-shape? shape) (cfh/get-children-ids objects id))]
+            shape-ids
+            (cond (cfh/text-shape? shape)  [id]
+                  (cfh/group-shape? shape) (cfh/get-children-ids objects id))]
 
         (rx/of (dwsh/update-shapes shape-ids update-fn))))))
 
@@ -487,11 +490,7 @@
       ;; We don't have the fills attribute. It's an old text without color
       ;; so need to be black
       (and (nil? (:fills node)) (empty? color-attrs))
-      (assoc :fills (txt/get-default-text-fills))
-
-      ;; Remove duplicates from the fills
-      :always
-      (update :fills types.fills/update distinct))))
+      (assoc :fills (txt/get-default-text-fills)))))
 
 (defn migrate-content
   [content]
@@ -667,9 +666,9 @@
   (ptk/reify ::commit-update-text-modifier
     ptk/WatchEvent
     (watch [_ state _]
-      (let [ids (::update-text-modifier-debounce-ids state)]
-        (let [modif-tree (dwm/create-modif-tree ids (ctm/reflow-modifiers))]
-          (rx/of (dwm/update-modifiers modif-tree false true)))))))
+      (let [ids        (::update-text-modifier-debounce-ids state)
+            modif-tree (dwm/create-modif-tree ids (ctm/reflow-modifiers))]
+        (rx/of (dwm/update-modifiers modif-tree false true))))))
 
 (defn update-text-modifier
   [id props]
@@ -810,7 +809,9 @@
     (effect [_ state _]
       (when (features/active-feature? state "text-editor/v2")
         (let [instance (:workspace-editor state)
-              styles (styles/attrs->styles attrs)]
+              attrs-to-override (some-> (editor.v2/getCurrentStyle instance) (styles/get-styles-from-style-declaration))
+              overriden-attrs (merge attrs-to-override attrs)
+              styles  (styles/attrs->styles overriden-attrs)]
           (editor.v2/applyStylesToSelection instance styles))))))
 
 (defn update-all-attrs
@@ -963,17 +964,15 @@
               modifiers    (get-in state [:workspace-text-modifier id])
               new-shape?   (nil? (:content shape))]
           (rx/of
-           (dwsh/update-shapes
-            [id]
-            (fn [shape]
-              (let [{:keys [width height position-data]} modifiers]
-                (let [new-shape (-> shape
-                                    (assoc :content content)
-                                    (cond-> position-data
-                                      (assoc :position-data position-data))
-                                    (cond-> (and update-name? (some? name))
-                                      (assoc :name name))
-                                    (cond-> (or (some? width) (some? height))
-                                      (gsh/transform-shape (ctm/change-size shape width height))))]
-                  new-shape)))
-            {:undo-group (when new-shape? id)})))))))
+           (dwsh/update-shapes [id]
+                               (fn [shape]
+                                 (let [{:keys [width height position-data]} modifiers]
+                                   (-> shape
+                                       (assoc :content content)
+                                       (cond-> position-data
+                                         (assoc :position-data position-data))
+                                       (cond-> (and update-name? (some? name))
+                                         (assoc :name name))
+                                       (cond-> (or (some? width) (some? height))
+                                         (gsh/transform-shape (ctm/change-size shape width height))))))
+                               {:undo-group (when new-shape? id)})))))))

@@ -320,6 +320,31 @@
             (pcb/with-file-data file-data)
             (pcb/update-shapes shape-ids detach-shape))))))
 
+(defmethod repair-error :ref-shape-is-not-head
+  [_ {:keys [shape page-id] :as error} file-data _]
+  (let [repair-shape
+        (fn [shape]
+          ; Convert shape in a normal copy, removing nested copy status
+          (log/debug :hint "  -> unhead shape")
+          (ctk/unhead-shape shape))]
+
+    (log/dbg :hint "repairing shape :shape-ref-is-not-head" :id (:id shape) :name (:name shape) :page-id page-id)
+    (-> (pcb/empty-changes nil page-id)
+        (pcb/with-file-data file-data)
+        (pcb/update-shapes [(:id shape)] repair-shape))))
+
+(defmethod repair-error :ref-shape-is-head
+  [_ {:keys [shape page-id args] :as error} file-data _]
+  (let [repair-shape
+        (fn [shape]
+          ; Convert shape in a nested head, adding component info
+          (log/debug :hint "  -> reroot shape")
+          (ctk/rehead-shape shape (:component-file args) (:component-id args)))]
+
+    (log/dbg :hint "repairing shape :shape-ref-is-head" :id (:id shape) :name (:name shape) :page-id page-id)
+    (-> (pcb/empty-changes nil page-id)
+        (pcb/with-file-data file-data)
+        (pcb/update-shapes [(:id shape)] repair-shape))))
 
 (defmethod repair-error :shape-ref-cycle
   [_ {:keys [shape args] :as error} file-data _]
@@ -490,6 +515,19 @@
     (-> (pcb/empty-changes nil)
         (pcb/with-library-data file-data)
         (pcb/update-component (:id shape) repair-component))))
+
+(defmethod repair-error :invalid-text-touched
+  [_ {:keys [shape page-id] :as error} file-data _]
+  (let [repair-shape
+        (fn [shape]
+          ;; Add content group
+          (log/debug :hint "  -> add :content-group to :touched-groups")
+          (update shape :touched ctk/set-touched-group :content-group))]
+
+    (log/dbg :hint "repairing shape :invalid-text-touched" :id (:id shape) :name (:name shape) :page-id page-id)
+    (-> (pcb/empty-changes nil page-id)
+        (pcb/with-file-data file-data)
+        (pcb/update-shapes [(:id shape)] repair-shape))))
 
 (defmethod repair-error :misplaced-slot
   [_ {:keys [shape page-id] :as error} file-data _]

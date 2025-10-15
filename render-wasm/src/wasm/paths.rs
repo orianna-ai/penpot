@@ -1,16 +1,37 @@
-use crate::shapes::{Path, Segment};
-use crate::{mem, with_current_shape_mut, STATE};
+#![allow(unused_mut, unused_variables)]
+use macros::ToJs;
+use mem::SerializableResult;
+use std::mem::size_of;
+use std::sync::{Mutex, OnceLock};
+
+use crate::shapes::{Path, Segment, ToPath};
+use crate::{mem, with_current_shape, with_current_shape_mut, STATE};
 
 const RAW_SEGMENT_DATA_SIZE: usize = size_of::<RawSegmentData>();
 
+pub mod bools;
+
 #[repr(C, u16, align(4))]
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, ToJs)]
 #[allow(dead_code)]
 enum RawSegmentData {
     MoveTo(RawMoveCommand) = 0x01,
     LineTo(RawLineCommand) = 0x02,
     CurveTo(RawCurveCommand) = 0x03,
     Close = 0x04,
+}
+
+impl RawSegmentData {
+    pub fn from_segment(segment: Segment) -> Self {
+        match segment {
+            Segment::MoveTo(to) => RawSegmentData::MoveTo(RawMoveCommand::new(to)),
+            Segment::LineTo(to) => RawSegmentData::LineTo(RawLineCommand::new(to)),
+            Segment::CurveTo((c1, c2, to)) => {
+                RawSegmentData::CurveTo(RawCurveCommand::new(c1, c2, to))
+            }
+            Segment::Close => RawSegmentData::Close,
+        }
+    }
 }
 
 impl From<[u8; size_of::<RawSegmentData>()]> for RawSegmentData {
@@ -30,12 +51,43 @@ impl TryFrom<&[u8]> for RawSegmentData {
     }
 }
 
+impl SerializableResult for RawSegmentData {
+    type BytesType = [u8; RAW_SEGMENT_DATA_SIZE];
+
+    fn from_bytes(bytes: Self::BytesType) -> Self {
+        unsafe { std::mem::transmute(bytes) }
+    }
+
+    fn as_bytes(&self) -> Self::BytesType {
+        let ptr = self as *const RawSegmentData as *const u8;
+        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(ptr, RAW_SEGMENT_DATA_SIZE) };
+        let mut result = [0; RAW_SEGMENT_DATA_SIZE];
+        result.copy_from_slice(bytes);
+        result
+    }
+
+    // The generic trait doesn't know the size of the array. This is why the
+    // clone needs to be here even if it could be generic.
+    fn clone_to_slice(&self, slice: &mut [u8]) {
+        slice.clone_from_slice(&self.as_bytes());
+    }
+}
+
 #[repr(C, align(4))]
 #[derive(Debug, PartialEq, Clone, Copy)]
 struct RawMoveCommand {
     _padding: [u32; 4],
     x: f32,
     y: f32,
+}
+impl RawMoveCommand {
+    pub fn new((x, y): (f32, f32)) -> Self {
+        Self {
+            _padding: [0u32; 4],
+            x,
+            y,
+        }
+    }
 }
 
 #[repr(C, align(4))]
@@ -44,6 +96,16 @@ struct RawLineCommand {
     _padding: [u32; 4],
     x: f32,
     y: f32,
+}
+
+impl RawLineCommand {
+    pub fn new((x, y): (f32, f32)) -> Self {
+        Self {
+            _padding: [0u32; 4],
+            x,
+            y,
+        }
+    }
 }
 
 #[repr(C, align(4))]
@@ -55,6 +117,19 @@ struct RawCurveCommand {
     c2_y: f32,
     x: f32,
     y: f32,
+}
+
+impl RawCurveCommand {
+    pub fn new((c1_x, c1_y): (f32, f32), (c2_x, c2_y): (f32, f32), (x, y): (f32, f32)) -> Self {
+        Self {
+            c1_x,
+            c1_y,
+            c2_x,
+            c2_y,
+            x,
+            y,
+        }
+    }
 }
 
 impl From<RawSegmentData> for Segment {
@@ -77,19 +152,77 @@ impl From<Vec<RawSegmentData>> for Path {
     }
 }
 
+static PATH_UPLOAD_BUFFER: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+
+fn get_path_upload_buffer() -> &'static Mutex<Vec<u8>> {
+    PATH_UPLOAD_BUFFER.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[no_mangle]
+pub extern "C" fn start_shape_path_buffer() {
+    let buffer = get_path_upload_buffer();
+    let mut buffer = buffer.lock().unwrap();
+    buffer.clear();
+}
+
+#[no_mangle]
+pub extern "C" fn set_shape_path_chunk_buffer() {
+    let bytes = mem::bytes();
+    let buffer = get_path_upload_buffer();
+    let mut buffer = buffer.lock().unwrap();
+    buffer.extend_from_slice(&bytes);
+    mem::free_bytes();
+}
+
+#[no_mangle]
+pub extern "C" fn set_shape_path_buffer() {
+    with_current_shape_mut!(state, |shape: &mut Shape| {
+        let buffer = get_path_upload_buffer();
+        let mut buffer = buffer.lock().unwrap();
+        let chunk_size = size_of::<RawSegmentData>();
+        if buffer.len() % chunk_size != 0 {
+            // FIXME
+            println!("Warning: buffer length is not a multiple of chunk size!");
+        }
+        let mut segments = Vec::new();
+        for (i, chunk) in buffer.chunks(chunk_size).enumerate() {
+            match RawSegmentData::try_from(chunk) {
+                Ok(seg) => segments.push(Segment::from(seg)),
+                Err(e) => println!("Error at segment {}: {}", i, e),
+            }
+        }
+        shape.set_path_segments(segments);
+        buffer.clear();
+    });
+}
+
 #[no_mangle]
 pub extern "C" fn set_shape_path_content() {
     with_current_shape_mut!(state, |shape: &mut Shape| {
         let bytes = mem::bytes();
-
         let segments = bytes
             .chunks(size_of::<RawSegmentData>())
             .map(|chunk| RawSegmentData::try_from(chunk).expect("Invalid path data"))
             .map(Segment::from)
             .collect();
-
         shape.set_path_segments(segments);
     });
+}
+
+#[no_mangle]
+pub extern "C" fn current_to_path() -> *mut u8 {
+    let mut result = Vec::<RawSegmentData>::default();
+    with_current_shape!(state, |shape: &Shape| {
+        let path = shape.to_path(&state.shapes, &state.modifiers, &state.structure);
+        result = path
+            .segments()
+            .iter()
+            .copied()
+            .map(RawSegmentData::from_segment)
+            .collect();
+    });
+
+    mem::write_vec(result)
 }
 
 // Extracts a string from the bytes slice until the next null byte (0) and returns the result as a `String`.

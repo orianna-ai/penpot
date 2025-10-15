@@ -119,7 +119,10 @@
     ;; Only for developtment.
     :tiered-file-data-storage
     :token-units
+    :token-base-font-size
+    :token-color
     :token-typography-types
+    :token-typography-composite
     :transit-readable-response
     :user-feedback
     ;; TODO: remove this flag.
@@ -131,7 +134,19 @@
     :hide-release-modal
     :subscriptions
     :subscriptions-old
-    :frontend-binary-fills})
+    :inspect-styles
+
+    ;; Security layer middleware that filters request by fetch
+    ;; metadata headers
+    :sec-fetch-metadata-middleware
+
+    ;; Security layer middleware that check the precense of x-client
+    ;; http headers and enables an addtional csrf protection
+    :client-header-check-middleware
+
+    ;; A temporal flag, enables backend code use more extensivelly
+    ;; redis for caching data
+    :redis-cache})
 
 (def all-flags
   (set/union email login varia))
@@ -153,7 +168,11 @@
    :enable-dashboard-templates-section
    :enable-google-fonts-provider
    :enable-component-thumbnails
-   :enable-render-wasm-dpr])
+   :enable-render-wasm-dpr
+   :enable-token-units
+   :enable-token-typography-types
+   :enable-token-typography-composite
+   :enable-feature-fdata-objects-map])
 
 (defn parse
   [& flags]

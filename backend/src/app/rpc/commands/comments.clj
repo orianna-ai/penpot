@@ -6,11 +6,13 @@
 
 (ns app.rpc.commands.comments
   (:require
+   [app.binfile.common :as bfc]
    [app.common.data :as d]
    [app.common.data.macros :as dm]
    [app.common.exceptions :as ex]
    [app.common.geom.point :as gpt]
    [app.common.schema :as sm]
+   [app.common.time :as ct]
    [app.common.uri :as uri]
    [app.common.uuid :as uuid]
    [app.config :as cf]
@@ -29,7 +31,6 @@
    [app.rpc.retry :as rtry]
    [app.util.pointer-map :as pmap]
    [app.util.services :as sv]
-   [app.util.time :as dt]
    [clojure.set :as set]
    [cuerdas.core :as str]))
 
@@ -163,34 +164,16 @@
 (def xf-decode-row
   (map decode-row))
 
-(def ^:private
-  sql:get-file
-  "SELECT f.id, f.modified_at, f.revn, f.features, f.name,
-          f.project_id, p.team_id, f.data,
-          f.data_ref_id, f.data_backend
-     FROM file as f
-    INNER JOIN project as p on (p.id = f.project_id)
-    WHERE f.id = ?
-      AND (f.deleted_at IS NULL OR f.deleted_at > now())")
-
 (defn- get-file
   "A specialized version of get-file for comments module."
   [cfg file-id page-id]
-  (let [file (db/exec-one! cfg [sql:get-file file-id])]
-    (when-not file
-      (ex/raise :type :not-found
-                :code :object-not-found
-                :hint "file not found"))
-
-    (binding [pmap/*load-fn* (partial feat.fdata/load-pointer cfg file-id)]
-      (let [file (->> file
-                      (files/decode-row)
-                      (feat.fdata/resolve-file-data cfg))
-            data (get file :data)]
-        (-> file
-            (assoc :page-name (dm/get-in data [:pages-index page-id :name]))
-            (assoc :page-id page-id)
-            (dissoc :data))))))
+  (binding [pmap/*load-fn* (partial feat.fdata/load-pointer cfg file-id)]
+    (let [file (bfc/get-file cfg file-id)
+          data (get file :data)]
+      (-> file
+          (assoc :page-name (dm/get-in data [:pages-index page-id :name]))
+          (assoc :page-id page-id)
+          (dissoc :data)))))
 
 ;; FIXME: rename
 (defn- get-comment-thread
@@ -222,7 +205,7 @@
 
 (defn upsert-comment-thread-status!
   ([conn profile-id thread-id]
-   (upsert-comment-thread-status! conn profile-id thread-id (dt/in-future "1s")))
+   (upsert-comment-thread-status! conn profile-id thread-id (ct/in-future "1s")))
   ([conn profile-id thread-id mod-at]
    (db/exec-one! conn [sql:upsert-comment-thread-status thread-id profile-id mod-at mod-at])))
 
@@ -274,6 +257,8 @@
     INNER JOIN project AS p ON (p.id = f.project_id)
      LEFT JOIN comment_thread_status AS cts ON (cts.thread_id = ct.id AND cts.profile_id = ?)
      LEFT JOIN profile AS pf ON (ct.owner_id = pf.id)
+    WHERE f.deleted_at IS NULL
+      AND p.deleted_at IS NULL
    WINDOW w AS (PARTITION BY c.thread_id ORDER BY c.created_at ASC)")
 
 (def ^:private sql:comment-threads-by-file-id
@@ -287,7 +272,35 @@
 
 ;; --- COMMAND: Get Unread Comment Threads
 
-(declare ^:private get-unread-comment-threads)
+(def ^:private sql:unread-all-comment-threads-by-team
+  (str "WITH threads AS (" sql:comment-threads ")"
+       "SELECT * FROM threads WHERE count_unread_comments > 0 AND team_id = ?"))
+
+;; The partial configuration will retrieve only comments created by the user and
+;; threads that have a mention to the user.
+(def ^:private sql:unread-partial-comment-threads-by-team
+  (str "WITH threads AS (" sql:comment-threads ")"
+       "SELECT * FROM threads
+         WHERE count_unread_comments > 0
+           AND team_id = ?
+           AND (owner_id = ? OR ? = ANY(mentions))"))
+
+(defn- get-unread-comment-threads
+  [cfg profile-id team-id]
+  (let [profile (-> (db/get cfg :profile {:id profile-id})
+                    (profile/decode-row))
+        notify  (or (-> profile :props :notifications :dashboard-comments) :all)]
+
+    (case notify
+      :all
+      (->> (db/exec! cfg [sql:unread-all-comment-threads-by-team profile-id team-id])
+           (into [] xf-decode-row))
+
+      :partial
+      (->> (db/exec! cfg [sql:unread-partial-comment-threads-by-team profile-id team-id profile-id profile-id])
+           (into [] xf-decode-row))
+
+      [])))
 
 (def ^:private
   schema:get-unread-comment-threads
@@ -298,41 +311,8 @@
   {::doc/added "1.15"
    ::sm/params schema:get-unread-comment-threads}
   [cfg {:keys [::rpc/profile-id team-id] :as params}]
-  (db/run!
-   cfg
-   (fn [{:keys [::db/conn]}]
-     (teams/check-read-permissions! conn profile-id team-id)
-     (get-unread-comment-threads conn profile-id team-id))))
-
-(def sql:unread-all-comment-threads-by-team
-  (str "WITH threads AS (" sql:comment-threads ")"
-       "SELECT * FROM threads WHERE count_unread_comments > 0 AND team_id = ?"))
-
-;; The partial configuration will retrieve only comments created by the user and
-;; threads that have a mention to the user.
-(def sql:unread-partial-comment-threads-by-team
-  (str "WITH threads AS (" sql:comment-threads ")"
-       "SELECT * FROM threads
-         WHERE count_unread_comments > 0
-           AND team_id = ?
-           AND (owner_id = ? OR ? = ANY(mentions))"))
-
-(defn- get-unread-comment-threads
-  [conn profile-id team-id]
-  (let [profile (-> (db/get conn :profile {:id profile-id})
-                    (profile/decode-row))
-        notify  (or (-> profile :props :notifications :dashboard-comments) :all)]
-
-    (case notify
-      :all
-      (->> (db/exec! conn [sql:unread-all-comment-threads-by-team profile-id team-id])
-           (into [] xf-decode-row))
-
-      :partial
-      (->> (db/exec! conn [sql:unread-partial-comment-threads-by-team profile-id team-id profile-id profile-id])
-           (into [] xf-decode-row))
-
-      [])))
+  (teams/check-read-permissions! cfg profile-id team-id)
+  (get-unread-comment-threads cfg profile-id team-id))
 
 ;; --- COMMAND: Get Single Comment Thread
 

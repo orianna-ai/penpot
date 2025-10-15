@@ -22,10 +22,10 @@
    [app.main.ui.ds.controls.combobox :refer [combobox*]]
    [app.main.ui.ds.controls.input :refer [input*]]
    [app.main.ui.ds.controls.utilities.label :refer [label*]]
-   [app.main.ui.ds.foundations.assets.icon :refer [icon*] :as ic]
+   [app.main.ui.ds.foundations.assets.icon :refer [icon*] :as i]
    [app.main.ui.ds.foundations.typography.heading :refer [heading*]]
    [app.main.ui.ds.foundations.typography.text :refer [text*]]
-   [app.main.ui.icons :as i]
+   [app.main.ui.icons :as deprecated-icon]
    [app.main.ui.workspace.tokens.sets.lists :as wts]
    [app.util.dom :as dom]
    [app.util.i18n :refer [tr]]
@@ -69,16 +69,16 @@
                        :name name}
      [:& radio-button {:id :on
                        :value :on
-                       :icon i/tick
+                       :icon deprecated-icon/tick
                        :label ""}]
      [:& radio-button {:id :off
                        :value :off
-                       :icon i/close
+                       :icon deprecated-icon/close
                        :label ""}]]))
 
 (mf/defc themes-overview
   [{:keys [change-view]}]
-  (let [active-theme-ids (mf/deref refs/workspace-active-theme-paths)
+  (let [active-theme-paths (mf/deref refs/workspace-active-theme-paths)
         themes-groups (mf/deref refs/workspace-token-theme-tree-no-hidden)
 
         create-theme
@@ -102,23 +102,23 @@
                          :class (stl/css :theme-group-label)
                          :typography "body-large"}
             [:div {:class (stl/css :group-title) :title (str (tr "workspace.tokens.group-name") ": " group)}
-             [:> icon* {:icon-id "group" :class (stl/css :group-title-icon)}]
+             [:> icon* {:icon-id i/group :class (stl/css :group-title-icon)}]
              [:> text* {:as "span" :typography "body-medium" :class (stl/css :group-title-name)} group]]])
          [:ul {:class (stl/css :theme-group-rows-wrapper)}
-          (for [[_ {:keys [group name] :as theme}] themes
-                :let [theme-id (ctob/theme-path theme)
-                      selected? (some? (get active-theme-ids theme-id))
+          (for [[_ {:keys [id name] :as theme}] themes
+                :let [theme-path (ctob/get-theme-path theme)
+                      selected? (some? (get active-theme-paths theme-path))
                       delete-theme
                       (fn [e]
                         (dom/prevent-default e)
                         (dom/stop-propagation e)
-                        (st/emit! (dwtl/delete-token-theme group name)))
+                        (st/emit! (dwtl/delete-token-theme id)))
                       on-edit-theme
                       (fn [e]
                         (dom/prevent-default e)
                         (dom/stop-propagation e)
-                        (change-view :edit-theme {:theme-path [(:id theme) (:group theme) (:name theme)]}))]]
-            [:li {:key theme-id
+                        (change-view :edit-theme {:theme-info [(:id theme) (:group theme) (:name theme)]}))]]
+            [:li {:key theme-path
                   :class (stl/css :theme-row)}
              [:div {:class (stl/css :theme-switch-row)}
 
@@ -126,7 +126,7 @@
               [:div {:on-click (fn [e]
                                  (dom/prevent-default e)
                                  (dom/stop-propagation e)
-                                 (st/emit! (dwtl/toggle-token-theme-active? group name)))}
+                                 (st/emit! (dwtl/toggle-token-theme-active? id)))}
                [:& switch {:name (tr "workspace.tokens.theme-name" name)
                            :on-change (constantly nil)
                            :selected? selected?}]]]
@@ -147,12 +147,12 @@
                    (if sets-count
                      (tr "workspace.tokens.num-active-sets" sets-count)
                      (tr "workspace.tokens.no-active-sets"))]
-                  [:> icon* {:icon-id "arrow-right"}]]])
+                  [:> icon* {:icon-id i/arrow-right}]]])
 
               [:> icon-button* {:on-click delete-theme
                                 :variant "ghost"
                                 :aria-label (tr "workspace.tokens.delete-theme-title")
-                                :icon "delete"}]]])]])]
+                                :icon i/delete}]]])]])]
 
      [:div {:class (stl/css :button-footer)}
       [:> button* {:variant "secondary"
@@ -238,7 +238,7 @@
   (let [tlib (-> (ctob/make-tokens-lib)
                  (ctob/add-theme theme))
         tlib (reduce ctob/add-set tlib sets)]
-    (ctob/activate-theme tlib (:group theme) (:name theme))))
+    (ctob/activate-theme tlib (ctob/get-id theme))))
 
 (mf/defc edit-create-theme*
   [{:keys [change-view theme on-save is-editing has-prev-view]}]
@@ -285,7 +285,7 @@
         (mf/use-fn
          (mf/deps current-theme on-back)
          (fn []
-           (st/emit! (dwtl/delete-token-theme (:group current-theme) (:name current-theme)))
+           (st/emit! (dwtl/delete-token-theme (ctob/get-id current-theme)))
            (on-back)))
 
         ;; Sets tree handlers
@@ -318,9 +318,8 @@
         on-click-token-set
         (mf/use-fn
          (mf/deps on-toggle-token-set)
-         (fn [prefixed-set-path-str]
-           (let [set-name (ctob/prefixed-set-path-string->set-name-string prefixed-set-path-str)]
-             (on-toggle-token-set set-name))))]
+         (fn [set-id]
+           (on-toggle-token-set set-id)))]
 
     [:div {:class (stl/css :themes-modal-wrapper)}
      [:> heading* {:level 2 :typography "headline-medium" :class (stl/css :themes-modal-title)}
@@ -334,7 +333,7 @@
          [:button {:on-click on-back
                    :class (stl/css :back-btn)
                    :type "button"}
-          [:> icon* {:icon-id ic/arrow-left :aria-hidden true}]
+          [:> icon* {:icon-id i/arrow-left :aria-hidden true}]
           (tr "workspace.tokens.back-to-themes")])
 
        [:> theme-inputs* {:theme current-theme
@@ -357,7 +356,7 @@
         (when is-editing
           [:> button* {:variant "secondary"
                        :type "button"
-                       :icon "delete"
+                       :icon i/delete
                        :on-click on-delete-theme}
            (tr "labels.delete")])
         [:div {:class (stl/css :button-footer)}
@@ -370,16 +369,16 @@
 
 (mf/defc edit-theme
   [{:keys [state change-view]}]
-  (let [{:keys [theme-path]} state
-        [_ theme-group theme-name] theme-path
-        theme (mf/deref (refs/workspace-token-theme theme-group theme-name))
+  (let [{:keys [theme-info]} state
+        [theme-id _ _] theme-info
+        theme (mf/deref (refs/workspace-token-theme theme-id))
         has-prev-view (has-prev-view (:prev-type state))
 
         on-save
         (mf/use-fn
          (mf/deps theme)
          (fn [theme']
-           (st/emit! (dwtl/update-token-theme [(:group theme) (:name theme)] theme'))))]
+           (st/emit! (dwtl/update-token-theme (ctob/get-id theme) theme'))))]
 
     [:> edit-create-theme*
      {:change-view change-view
@@ -414,12 +413,12 @@
         state       (deref state*)
 
         change-view (mf/use-fn
-                     (fn [type & {:keys [theme-path]}]
+                     (fn [type & {:keys [theme-info]}]
                        (swap! state* (fn [current-state]
                                        (cond-> current-state
                                          :always (assoc :type type
                                                         :prev-type (:type current-state))
-                                         :theme-path (assoc :theme-path theme-path))))))
+                                         :theme-info (assoc :theme-info theme-info))))))
 
         component (case (:type state)
                     :empty-themes empty-themes
@@ -441,5 +440,5 @@
                       :on-click modal/hide!
                       :aria-label (tr "labels.close")
                       :variant "action"
-                      :icon "close"}]
+                      :icon i/close}]
     [:> themes-modal-body*]]])

@@ -71,7 +71,7 @@ test.describe("Shape attributes", () => {
     page,
   }) => {
     const workspace = new WorkspacePage(page);
-    await workspace.mockConfigFlags(["enable-frontend-binary-fills"]);
+    await workspace.mockConfigFlags(["enable-feature-render-wasm"]);
     await workspace.setupEmptyFile();
     await workspace.mockRPC(/get\-file\?/, "design/get-file-fills-limit.json");
 
@@ -88,6 +88,38 @@ test.describe("Shape attributes", () => {
     ).toHaveCount(8);
 
     await expect(workspace.page.getByTestId("add-fill")).toBeDisabled();
+  });
+
+  test("Cannot add a new text fill when the limit has been reached", async ({
+    page,
+  }) => {
+    const workspace = new WorkspacePage(page);
+    await workspace.mockConfigFlags(["enable-feature-render-wasm"]);
+    await workspace.setupEmptyFile();
+    await workspace.mockRPC(
+      /get\-file\?/,
+      "design/get-file-text-fills-limit.json",
+    );
+
+    await workspace.goToWorkspace({
+      fileId: "b1ff3fdf-b491-812b-8006-f2ce3d29333a",
+      pageId: "b1ff3fdf-b491-812b-8006-f2ce3d29333b",
+    });
+
+    await workspace.clickLeafLayer("Lorem ipsum");
+
+    await expect(
+      workspace.page.getByRole("button", { name: "Remove color" }),
+    ).toHaveCount(7);
+
+    await workspace.page.getByRole("button", { name: "Add fill" }).click();
+    await expect(
+      workspace.page.getByRole("button", { name: "Remove color" }),
+    ).toHaveCount(8);
+
+    await expect(
+      workspace.page.getByRole("button", { name: "Add fill" }),
+    ).toBeDisabled();
   });
 });
 
@@ -250,4 +282,41 @@ test("BUG 11177 - Font size input not showing 'mixed' when needed", async ({
 
   await expect(fontSizeInput).toHaveValue("");
   await expect(fontSizeInput).toHaveAttribute("placeholder", "Mixed");
+});
+
+test("BUG 12287 Fix identical text fills not being added/removed", async ({
+  page,
+}) => {
+  const workspace = new WorkspacePage(page);
+  await workspace.setupEmptyFile();
+  await workspace.mockRPC(/get\-file\?/, "design/get-file-12287.json");
+
+  await workspace.goToWorkspace({
+    fileId: "4bdef584-e28a-8155-8006-f3f8a71b382e",
+    pageId: "4bdef584-e28a-8155-8006-f3f8a71b382f",
+  });
+
+  await workspace.clickLeafLayer("Lorem ipsum");
+
+  const addFillButton = workspace.page.getByRole("button", {
+    name: "Add fill",
+  });
+
+  await addFillButton.click();
+  await addFillButton.click();
+  await addFillButton.click();
+  await addFillButton.click();
+
+  await expect(
+    workspace.page.getByRole("button", { name: "#B1B2B5" }),
+  ).toHaveCount(4);
+
+  await workspace.page
+    .getByRole("button", { name: "Remove color" })
+    .first()
+    .click();
+
+  await expect(
+    workspace.page.getByRole("button", { name: "#B1B2B5" }),
+  ).toHaveCount(3);
 });

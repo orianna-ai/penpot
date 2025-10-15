@@ -51,7 +51,6 @@
    [app.main.ui.workspace.viewport.viewport-ref :refer [create-viewport-ref]]
    [app.main.ui.workspace.viewport.widgets :as widgets]
    [app.render-wasm.api :as wasm.api]
-   [app.render-wasm.shape :as wasm.shape]
    [app.util.debug :as dbg]
    [app.util.text-editor :as ted]
    [beicon.v2.core :as rx]
@@ -297,8 +296,9 @@
         (->> wasm.api/module
              (p/fmap (fn [ready?]
                        (when ready?
-                         (reset! canvas-init? true)
-                         (wasm.api/assign-canvas canvas)))))
+                         (let [init? (wasm.api/init-canvas-context canvas)]
+                           (reset! canvas-init? init?)
+                           (when-not init? (js/alert "WebGL not supported")))))))
         (fn []
           (wasm.api/clear-canvas))))
 
@@ -310,7 +310,7 @@
                             (ted/export-content))]
             (wasm.api/use-shape edition)
             (wasm.api/set-shape-text-content edition content)
-            (let [dimension (wasm.api/text-dimensions)]
+            (let [dimension (wasm.api/get-text-dimensions)]
               (st/emit! (dwt/resize-text-editor edition dimension))
               (wasm.api/clear-drawing-cache)
               (wasm.api/request-render "content"))))))
@@ -348,9 +348,6 @@
           (wasm.api/show-grid @hover-top-frame-id)
           (wasm.api/clear-grid))))
 
-    (mf/with-effect [objects]
-      (wasm.shape/set-current-page-objects! objects))
-
     (hooks/setup-dom-events zoom disable-paste in-viewport? read-only? drawing-tool path-drawing?)
     (hooks/setup-viewport-size vport viewport-ref)
     (hooks/setup-cursor cursor alt? mod? space? panning drawing-tool path-drawing? path-editing? z? read-only?)
@@ -387,10 +384,8 @@
                                       :zoom zoom}])
 
       (when picking-color?
-        [:& pixel-overlay/pixel-overlay {:vport vport
-                                         :vbox vbox
-                                         :layout layout
-                                         :viewport-ref viewport-ref}])]
+        [:> pixel-overlay/pixel-overlay-wasm* {:viewport-ref viewport-ref
+                                               :canvas-ref canvas-ref}])]
 
      [:canvas {:id "render"
                :data-testid "canvas-wasm-shapes"
@@ -522,11 +517,11 @@
            :alt? @alt?
            :shift? @shift?}])
 
-       [:& widgets/frame-titles
+       [:> widgets/frame-titles*
         {:objects (with-meta objects-modified nil)
          :selected selected
          :zoom zoom
-         :show-artboard-names? show-artboard-names?
+         :is-show-artboard-names show-artboard-names?
          :on-frame-enter on-frame-enter
          :on-frame-leave on-frame-leave
          :on-frame-select on-frame-select
@@ -557,9 +552,8 @@
            :focus focus}])
 
        (when show-pixel-grid?
-         [:& widgets/pixel-grid
-          {:vbox vbox
-           :zoom zoom}])
+         [:> widgets/pixel-grid* {:vbox vbox
+                                  :zoom zoom}])
 
        (when show-snap-points?
          [:& snap-points/snap-points
@@ -582,13 +576,12 @@
            :page-id page-id}])
 
        (when show-cursor-tooltip?
-         [:& widgets/cursor-tooltip
-          {:zoom zoom
-           :tooltip tooltip}])
+         [:> widgets/cursor-tooltip* {:zoom zoom
+                                      :tooltip tooltip}])
 
        (when show-selrect?
-         [:& widgets/selection-rect {:data selrect
-                                     :zoom zoom}])
+         [:> widgets/selection-rect* {:data selrect
+                                      :zoom zoom}])
 
        (when show-presence?
          [:& presence/active-cursors

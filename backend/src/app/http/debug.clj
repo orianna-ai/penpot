@@ -15,6 +15,7 @@
    [app.common.features :as cfeat]
    [app.common.logging :as l]
    [app.common.pprint :as pp]
+   [app.common.time :as ct]
    [app.common.transit :as t]
    [app.common.uuid :as uuid]
    [app.config :as cf]
@@ -26,12 +27,12 @@
    [app.rpc.commands.profile :as profile]
    [app.rpc.commands.teams :as teams]
    [app.setup :as-alias setup]
+   [app.setup.clock :as clock]
    [app.srepl.main :as srepl]
    [app.storage :as-alias sto]
    [app.storage.tmp :as tmp]
    [app.util.blob :as blob]
    [app.util.template :as tmpl]
-   [app.util.time :as dt]
    [cuerdas.core :as str]
    [datoteka.io :as io]
    [emoji.core :as emj]
@@ -49,11 +50,17 @@
 
 (defn index-handler
   [_cfg _request]
-  {::yres/status  200
-   ::yres/headers {"content-type" "text/html"}
-   ::yres/body    (-> (io/resource "app/templates/debug.tmpl")
-                      (tmpl/render {:version (:full cf/version)
-                                    :supported-features cfeat/supported-features}))})
+  (let [{:keys [clock offset]} @clock/current]
+    {::yres/status  200
+     ::yres/headers {"content-type" "text/html"}
+     ::yres/body    (-> (io/resource "app/templates/debug.tmpl")
+                        (tmpl/render {:version (:full cf/version)
+                                      :current-clock  (str clock)
+                                      :current-offset (if offset
+                                                        (ct/format-duration offset)
+                                                        "NO OFFSET")
+                                      :current-time  (ct/format-inst (ct/now) :http)
+                                      :supported-features cfeat/supported-features}))}))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; FILE CHANGES
@@ -137,7 +144,7 @@
         file       (some-> params :file :path io/read* t/decode)]
 
     (if (and file project-id)
-      (let [fname     (str "Imported: " (:name file) "(" (dt/now) ")")
+      (let [fname     (str "Imported: " (:name file) "(" (ct/now) ")")
             reuse-id? (contains? params :reuseid)
             file-id   (or (and reuse-id? (ex/ignoring (-> params :file :filename parse-uuid)))
                           (uuid/next))]
@@ -222,7 +229,7 @@
             (-> (io/resource "app/templates/error-report.v3.tmpl")
                 (tmpl/render (-> content
                                  (assoc :id id)
-                                 (assoc :created-at (dt/format-instant created-at :rfc1123))))))]
+                                 (assoc :created-at (ct/format-inst created-at :rfc1123))))))]
 
     (if-let [report (get-report request)]
       (let [result (case (:version report)
@@ -246,7 +253,7 @@
 (defn error-list-handler
   [{:keys [::db/pool]} _request]
   (let [items (->> (db/exec! pool [sql:error-reports])
-                   (map #(update % :created-at dt/format-instant :rfc1123)))]
+                   (map #(update % :created-at ct/format-inst :rfc1123)))]
     {::yres/status 200
      ::yres/body (-> (io/resource "app/templates/error-list.tmpl")
                      (tmpl/render {:items items}))
@@ -390,34 +397,6 @@
                            ::yres/headers {"content-type" "text/plain"}
                            ::yres/body    (str/ffmt "PROFILE '%' ACTIVATED" (:email profile))}))))))
 
-
-(defn- reset-file-version
-  [cfg {:keys [params] :as request}]
-  (let [file-id (some-> params :file-id d/parse-uuid)
-        version (some-> params :version d/parse-integer)]
-
-    (when-not (contains? params :force)
-      (ex/raise :type :validation
-                :code :missing-force
-                :hint "missing force checkbox"))
-
-    (when (nil? file-id)
-      (ex/raise :type :validation
-                :code :invalid-file-id
-                :hint "provided invalid file id"))
-
-    (when (nil? version)
-      (ex/raise :type :validation
-                :code :invalid-version
-                :hint "provided invalid version"))
-
-    (db/tx-run! cfg srepl/process-file! file-id #(assoc % :version version))
-
-    {::yres/status  200
-     ::yres/headers {"content-type" "text/plain"}
-     ::yres/body    "OK"}))
-
-
 (defn- handle-team-features
   [cfg {:keys [params] :as request}]
   (let [team-id    (some-> params :team-id d/parse-uuid)
@@ -461,6 +440,24 @@
         {::yres/status  200
          ::yres/headers {"content-type" "text/plain"}
          ::yres/body    "OK"}))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; VIRTUAL CLOCK
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defn- set-virtual-clock
+  [_ {:keys [params] :as request}]
+  (let [offset (some-> params :offset str/trim not-empty ct/duration)
+        reset? (contains? params :reset)]
+    (if (= "production" (cf/get :tenant))
+      {::yres/status 501
+       ::yres/body "OPERATION NOT ALLOWED"}
+      (do
+        (if (or reset? (zero? (inst-ms offset)))
+          (clock/set-offset! nil)
+          (clock/set-offset! offset))
+        {::yres/status 302
+         ::yres/headers {"location" "/dbg"}}))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; OTHER SMALL VIEWS/HANDLERS
@@ -548,10 +545,10 @@
     ["/error/:id" {:handler (partial error-handler cfg)}]
     ["/error" {:handler (partial error-list-handler cfg)}]
     ["/actions" {:middleware [[errors]]}
+     ["/set-virtual-clock"
+      {:handler (partial set-virtual-clock cfg)}]
      ["/resend-email-verification"
       {:handler (partial resend-email-notification cfg)}]
-     ["/reset-file-version"
-      {:handler (partial reset-file-version cfg)}]
      ["/handle-team-features"
       {:handler (partial handle-team-features cfg)}]
      ["/file-export" {:handler (partial export-handler cfg)}]

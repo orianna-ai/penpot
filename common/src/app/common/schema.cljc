@@ -14,7 +14,6 @@
    [app.common.schema.generators :as sg]
    [app.common.schema.openapi :as-alias oapi]
    [app.common.schema.registry :as sr]
-   [app.common.time :as tm]
    [app.common.uri :as u]
    [app.common.uuid :as uuid]
    [clojure.core :as c]
@@ -132,34 +131,10 @@
   (->> (entries schema)
        (into #{} xf:map-key)))
 
-
-;; (defn key-transformer
-;;   [& {:as opts}]
-;;   (mt/key-transformer opts))
-
-;; (defn- transform-map-keys
-;;   [f o]
-;;   (cond
-;;     (record? o)
-;;     (reduce-kv (fn [res k v]
-;;                  (let [k' (f k)]
-;;                    (if (= k k')
-;;                      res
-;;                      (-> res
-;;                          (assoc k' v)
-;;                          (dissoc k)))))
-;;                o
-;;                o)
-
-;;     (map? o)
-;;     (persistent!
-;;      (reduce-kv (fn [res k v]
-;;                   (assoc! res (f k) v))
-;;                 (transient {})
-;;                 o))
-
-;;     :else
-;;     o))
+(defn update-properties
+  [s f & args]
+  (let [s (schema s)]
+    (apply m/-update-properties s f args)))
 
 (defn -transform-map-keys
   ([f]
@@ -445,54 +420,62 @@
   :min 0
   :max 1
   :compile
-  (fn [{:keys [kind max min] :as props} children _]
+  (fn [{:keys [kind max min ordered] :as props} children _]
     (let [kind  (or (last children) kind)
 
-          pred
+          child-pred
           (cond
             (fn? kind)  kind
             (nil? kind) any?
             :else       (validator kind))
 
+          type-pred
+          (if ordered
+            d/ordered-set?
+            set?)
+
           pred
           (cond
             (and max min)
             (fn [value]
-              (let [size (count value)]
-                (and (set? value)
-                     (<= min size max)
-                     (every? pred value))))
+              (and (type-pred value)
+                   (every? child-pred value)
+                   (<= min (count value) max)))
 
             min
             (fn [value]
-              (let [size (count value)]
-                (and (set? value)
-                     (<= min size)
-                     (every? pred value))))
+              (and (type-pred value)
+                   (every? child-pred value)
+                   (<= min (count value))))
 
             max
             (fn [value]
-              (let [size (count value)]
-                (and (set? value)
-                     (<= size max)
-                     (every? pred value))))
+              (and (type-pred value)
+                   (every? child-pred value)
+                   (<= (count value) max)))
 
             :else
             (fn [value]
-              (every? pred value)))
+              (and (type-pred value)
+                   (every? child-pred value))))
+
+          empty-set
+          (if ordered
+            (d/ordered-set)
+            #{})
 
           decode
           (fn [v]
             (cond
               (string? v)
               (let [v  (str/split v #"[\s,]+")]
-                (into #{} xf:filter-word-strings v))
+                (into empty-set xf:filter-word-strings v))
 
               (set? v)
               v
 
               (coll? v)
-              (into #{} v)
+              (into empty-set v)
 
               :else
               v))
@@ -680,8 +663,7 @@
                     identity)]
       {:pred #(contains? options %)
        :type-properties
-       {:title "one-of"
-        :description "One of the Set"
+       {:title "enum"
         :gen/gen (sg/elements options)
         :decode/string decode
         :decode/json decode
@@ -724,15 +706,14 @@
 
       {:pred pred
        :type-properties
-       {:title "int"
-        :description "int"
+       {:title "integer"
+        :description "integer"
         :error/message "expected to be int/long"
         :error/code "errors.invalid-integer"
         :gen/gen gen
         :decode/string parse-long
         :decode/json parse-long
-        ::oapi/type "integer"
-        ::oapi/format "int64"}}))})
+        ::oapi/type "integer"}}))})
 
 (defn parse-double
   [v]
@@ -794,8 +775,8 @@
 
       {:pred pred
        :type-properties
-       {:title "int"
-        :description "int"
+       {:title "number"
+        :description "number"
         :error/message "expected to be number"
         :error/code "errors.invalid-number"
         :gen/gen gen
@@ -845,43 +826,45 @@
                              #(some (fn [prop]
                                       (contains? % prop))
                                     choices))]
-               {:pred pred
-                :type-properties
-                {:title "contains any"
-                 :description "contains predicate"}}))})
+               {:pred pred}))})
 
-(register!
- {:type ::inst
-  :pred inst?
-  :type-properties
-  {:title "inst"
-   :description "Satisfies Inst protocol"
-   :error/message "should be an instant"
-   :gen/gen (->> (sg/small-int :min 0 :max 100000)
-                 (sg/fmap (fn [v] (tm/parse-instant v))))
+;; (register!
+;;  {:type ::inst
+;;   :pred tm/instant?
+;;   :type-properties
+;;   {:title "inst"
+;;    :description "Satisfies Inst protocol"
+;;    :error/message "should be an instant"
+;;    :gen/gen (->> (sg/small-int :min 0 :max 100000)
+;;                  (sg/fmap (fn [v] (tm/parse-inst v))))
 
-   :decode/string tm/parse-instant
-   :encode/string tm/format-instant
-   :decode/json tm/parse-instant
-   :encode/json tm/format-instant
-   ::oapi/type "string"
-   ::oapi/format "iso"}})
+;;    :decode/string tm/parse-inst
+;;    :encode/string tm/format-inst
+;;    :decode/json tm/parse-inst
+;;    :encode/json tm/format-inst
+;;    ::oapi/type "string"
+;;    ::oapi/format "iso"}})
 
-(register!
- {:type ::timestamp
-  :pred inst?
-  :type-properties
-  {:title "inst"
-   :description "Satisfies Inst protocol"
-   :error/message "should be an instant"
-   :gen/gen (->> (sg/small-int)
-                 (sg/fmap (fn [v] (tm/parse-instant v))))
-   :decode/string tm/parse-instant
-   :encode/string inst-ms
-   :decode/json tm/parse-instant
-   :encode/json inst-ms
-   ::oapi/type "string"
-   ::oapi/format "number"}})
+;; (register!
+;;  {:type ::timestamp
+;;   :pred tm/instant?
+;;   :type-properties
+;;   {:title "inst"
+;;    :description "Satisfies Inst protocol, the same as ::inst but encodes to epoch"
+;;    :error/message "should be an instant"
+;;    :gen/gen (->> (sg/small-int)
+;;                  (sg/fmap (fn [v] (tm/parse-inst v))))
+;;    :decode/string tm/parse-inst
+;;    :encode/string inst-ms
+;;    :decode/json tm/parse-inst
+;;    :encode/json inst-ms
+;;    ::oapi/type "string"
+;;    ::oapi/format "number"}})
+
+#?(:clj
+   (register!
+    {:type ::atom
+     :pred #(instance? clojure.lang.Atom %)}))
 
 (register!
  {:type ::fn
@@ -944,6 +927,8 @@
    :gen/gen (sg/uri)
    :decode/string decode-uri
    :decode/json decode-uri
+   :encode/json str
+   :encode/string str
    ::oapi/type "string"
    ::oapi/format "uri"}})
 
@@ -969,6 +954,7 @@
   :type-properties
   {:title "string"
    :description "not whitespace string"
+   ::oapi/type "string"
    :gen/gen (sg/word-string)
    :error/fn
    (fn [{:keys [value schema]}]

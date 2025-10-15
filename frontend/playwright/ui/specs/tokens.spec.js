@@ -20,7 +20,10 @@ const setupEmptyTokensFile = async (page) => {
     "workspace/update-file-create-rect.json",
   );
 
-  await workspacePage.goToWorkspace();
+  await workspacePage.goToWorkspace({
+    fileId: "c7ce0794-0992-8105-8004-38f280443849",
+    pageId: "66697432-c33d-8055-8006-2c62cc084cad",
+  });
 
   const tokensTabButton = page.getByRole("tab", { name: "Tokens" });
   await tokensTabButton.click();
@@ -35,26 +38,33 @@ const setupEmptyTokensFile = async (page) => {
   };
 };
 
-const setupTokensFile = async (page) => {
+const setupTokensFile = async (page, options = {}) => {
+  const {
+    file = "workspace/get-file-tokens.json",
+    fileFragment = "workspace/get-file-fragment-tokens.json",
+    flags = [],
+  } = options;
+
   const workspacePage = new WorkspacePage(page);
+  if (flags.length > 0) {
+    await workspacePage.mockConfigFlags(flags);
+  }
+
   await workspacePage.setupEmptyFile();
   await workspacePage.mockRPC(
     "get-team?id=*",
     "workspace/get-team-tokens.json",
   );
-  await workspacePage.mockRPC(/get\-file\?/, "workspace/get-file-tokens.json");
-  await workspacePage.mockRPC(
-    /get\-file\-fragment\?/,
-    "workspace/get-file-fragment-tokens.json",
-  );
+  await workspacePage.mockRPC(/get\-file\?/, file);
+  await workspacePage.mockRPC(/get\-file\-fragment\?/, fileFragment);
   await workspacePage.mockRPC(
     "update-file?id=*",
     "workspace/update-file-create-rect.json",
   );
 
   await workspacePage.goToWorkspace({
-    fileId: "51e13852-1a8e-8037-8005-9e9413a1f1f6",
-    pageId: "51e13852-1a8e-8037-8005-9e9413a1f1f7",
+    fileId: "c7ce0794-0992-8105-8004-38f280443849",
+    pageId: "66697432-c33d-8055-8006-2c62cc084cad",
   });
 
   const tokensTabButton = page.getByRole("tab", { name: "Tokens" });
@@ -71,6 +81,18 @@ const setupTokensFile = async (page) => {
     tokenContextMenuForToken: workspacePage.tokenContextMenuForToken,
     tokenContextMenuForSet: workspacePage.tokenContextMenuForSet,
   };
+};
+
+const setupTypographyTokensFile = async (page, options = {}) => {
+  return setupTokensFile(page, {
+    file: "workspace/get-file-typography-tokens.json",
+    fileFragment: "workspace/get-file-fragment-typography-tokens.json",
+    flags: [
+      "enable-token-typography-types",
+      "enable-token-typography-composite",
+    ],
+    ...options,
+  });
 };
 
 test.describe("Tokens: Tokens Tab", () => {
@@ -97,7 +119,6 @@ test.describe("Tokens: Tokens Tab", () => {
       .click();
 
     // Create color token with mouse
-
     await expect(tokensUpdateCreateModal).toBeVisible();
 
     const nameField = tokensUpdateCreateModal.getByLabel("Name");
@@ -153,7 +174,7 @@ test.describe("Tokens: Tokens Tab", () => {
     ).toBeEnabled();
 
     // Tokens tab panel should have two tokens with the color red / #ff0000
-    await expect(tokensTabPanel.getByTitle("#ff0000")).toHaveCount(2);
+    await expect(tokensTabPanel.getByRole("button", {name: "#ff0000"})).toHaveCount(2);
 
     // Global set has been auto created and is active
     await expect(
@@ -383,6 +404,35 @@ test.describe("Tokens: Tokens Tab", () => {
     await expect(tokensTabPanel.getByLabel("color.dark.primary")).toBeEnabled();
   });
 
+  test("User cant create regular token with value missing", async ({
+    page,
+  }) => {
+    const { tokensUpdateCreateModal } = await setupEmptyTokensFile(page);
+
+    const tokensTabPanel = page.getByRole("tabpanel", { name: "tokens" });
+    await tokensTabPanel
+      .getByRole("button", { name: "Add Token: Color" })
+      .click();
+
+    await expect(tokensUpdateCreateModal).toBeVisible();
+
+    const nameField = tokensUpdateCreateModal.getByLabel("Name");
+    const valueField = tokensUpdateCreateModal.getByLabel("Value");
+    const submitButton = tokensUpdateCreateModal.getByRole("button", {
+      name: "Save",
+    });
+
+    // Initially submit button should be disabled
+    await expect(submitButton).toBeDisabled();
+
+    // Fill in name but leave value empty
+    await nameField.click();
+    await nameField.fill("color.primary");
+
+    // Submit button should remain disabled when value is empty
+    await expect(submitButton).toBeDisabled();
+  });
+
   test("User changes color token color while keeping custom color space", async ({
     page,
   }) => {
@@ -531,9 +581,7 @@ test.describe("Tokens: Sets Tab", () => {
 
   const assertEmptySetsList = async (el) => {
     const buttons = await el.getByRole("button").allTextContents();
-    const filteredButtons = buttons.filter(
-      (text) => text === "Create one.",
-    );
+    const filteredButtons = buttons.filter((text) => text === "Create one.");
     await expect(filteredButtons.length).toEqual(2); // We assume there are no themes, so we have two "Create one" buttons.
   };
 
@@ -831,7 +879,10 @@ test.describe("Tokens: Themes modal", () => {
   });
 
   test.describe("Tokens: Apply token", () => {
-    test("User applies color token to a shape", async ({ page }) => {
+    // When deleting the "enable-token-color" flag, permanently remove this test.
+    test("User applies color token to a shape without tokens on design-tab", async ({
+      page,
+    }) => {
       const { workspacePage, tokensSidebar, tokenContextMenuForToken } =
         await setupTokensFile(page);
 
@@ -859,6 +910,245 @@ test.describe("Tokens: Themes modal", () => {
         name: "Color",
       });
       await expect(inputColor).toHaveValue("000000");
+    });
+
+    test("User applies color token to a shape", async ({ page }) => {
+      const { workspacePage, tokensSidebar, tokenContextMenuForToken } =
+        await setupTokensFile(page, { flags: ["enable-token-color"] });
+
+      await page.getByRole("tab", { name: "Layers" }).click();
+
+      await workspacePage.layers
+        .getByTestId("layer-row")
+        .filter({ hasText: "Button" })
+        .click();
+
+      const tokensTabButton = page.getByRole("tab", { name: "Tokens" });
+      await tokensTabButton.click();
+
+      await tokensSidebar
+        .getByRole("button")
+        .filter({ hasText: "Color" })
+        .click();
+
+      await tokensSidebar
+        .getByRole("button", { name: "colors.black" })
+        .click({ button: "right" });
+      await tokenContextMenuForToken.getByText("Fill").click();
+
+      await expect(
+        workspacePage.page.getByLabel("Name: colors.black"),
+      ).toBeVisible();
+    });
+
+    test("User applies typography token to a text shape", async ({ page }) => {
+      const { workspacePage, tokensSidebar, tokenContextMenuForToken } =
+        await setupTypographyTokensFile(page);
+
+      await page.getByRole("tab", { name: "Layers" }).click();
+
+      await workspacePage.layers
+        .getByTestId("layer-row")
+        .filter({ hasText: "Some Text" })
+        .click();
+
+      const tokensTabButton = page.getByRole("tab", { name: "Tokens" });
+      await tokensTabButton.click();
+
+      await tokensSidebar
+        .getByRole("button")
+        .filter({ hasText: "Typography" })
+        .click();
+
+      await tokensSidebar.getByRole("button", { name: "Full" }).click();
+
+      const fontSizeInput = workspacePage.rightSidebar.getByRole("textbox", {
+        name: "Font Size",
+      });
+      await expect(fontSizeInput).toBeVisible();
+      await expect(fontSizeInput).toHaveValue("100");
+    });
+
+    test("User edits typography token and all fields are valid", async ({
+      page,
+    }) => {
+      const { tokensUpdateCreateModal, tokenThemesSetsSidebar, tokensSidebar } =
+        await setupTypographyTokensFile(page);
+
+      await tokensSidebar
+        .getByRole("button")
+        .filter({ hasText: "Typography" })
+        .click();
+
+      // Open edit modal for "Full" typography token
+      const token = tokensSidebar.getByRole("button", { name: "Full" });
+      await token.click({ button: "right" });
+      await page.getByText("Edit token").click();
+
+      // Modal opens
+      await expect(tokensUpdateCreateModal).toBeVisible();
+
+      const saveButton = tokensUpdateCreateModal.getByRole("button", {
+        name: /save/i,
+      });
+
+      // Fill font-family to verify to verify that input value doesn't get split into list of characters
+      const fontFamilyField = tokensUpdateCreateModal
+        .getByLabel("Font family")
+        .first();
+      await fontFamilyField.fill("OneWord");
+
+      // Invalidate incorrect values for font size
+      const fontSizeField = tokensUpdateCreateModal.getByLabel(/Font Size/i);
+      await fontSizeField.fill("invalid");
+      await expect(
+        tokensUpdateCreateModal.getByText(/Invalid token value:/),
+      ).toBeVisible();
+      await expect(saveButton).toBeDisabled();
+
+      // Show error with line-height depending on invalid font-size
+      await fontSizeField.fill("");
+      await expect(saveButton).toBeDisabled();
+
+      // Fill in values for all fields and verify they persist when switching tabs
+      await fontSizeField.fill("16");
+
+      const fontWeightField =
+        tokensUpdateCreateModal.getByLabel(/Font Weight/i);
+      const letterSpacingField =
+        tokensUpdateCreateModal.getByLabel(/Letter Spacing/i);
+      const lineHeightField =
+        tokensUpdateCreateModal.getByLabel(/Line Height/i);
+      const textCaseField = tokensUpdateCreateModal.getByLabel(/Text Case/i);
+      const textDecorationField =
+        tokensUpdateCreateModal.getByLabel(/Text Decoration/i);
+
+      // Capture all values before switching tabs
+      const originalValues = {
+        fontSize: await fontSizeField.inputValue(),
+        fontFamily: await fontFamilyField.inputValue(),
+        fontWeight: await fontWeightField.inputValue(),
+        letterSpacing: await letterSpacingField.inputValue(),
+        lineHeight: await lineHeightField.inputValue(),
+        textCase: await textCaseField.inputValue(),
+        textDecoration: await textDecorationField.inputValue(),
+      };
+
+      // Switch to reference tab and back to composite tab
+      const referenceTabButton =
+        tokensUpdateCreateModal.getByTestId("reference-opt");
+      await referenceTabButton.click();
+
+      // Empty reference tab should be disabled
+      await expect(saveButton).toBeDisabled();
+
+      const compositeTabButton =
+        tokensUpdateCreateModal.getByTestId("composite-opt");
+      await compositeTabButton.click();
+
+      // Filled composite tab should be enabled
+      await expect(saveButton).toBeEnabled();
+
+      // Verify all values are preserved after switching tabs
+      await expect(fontSizeField).toHaveValue(originalValues.fontSize);
+      await expect(fontFamilyField).toHaveValue(originalValues.fontFamily);
+      await expect(fontWeightField).toHaveValue(originalValues.fontWeight);
+      await expect(letterSpacingField).toHaveValue(
+        originalValues.letterSpacing,
+      );
+      await expect(lineHeightField).toHaveValue(originalValues.lineHeight);
+      await expect(textCaseField).toHaveValue(originalValues.textCase);
+      await expect(textDecorationField).toHaveValue(
+        originalValues.textDecoration,
+      );
+
+      await saveButton.click();
+
+      // Modal should close, token should be visible (with new name) in sidebar
+      await expect(tokensUpdateCreateModal).not.toBeVisible();
+    });
+
+    test("User cant submit empty typography token or reference", async ({
+      page,
+    }) => {
+      const { tokensUpdateCreateModal, tokenThemesSetsSidebar, tokensSidebar } =
+        await setupTypographyTokensFile(page);
+
+      const tokensTabPanel = page.getByRole("tabpanel", { name: "tokens" });
+      await tokensTabPanel
+        .getByRole("button", { name: "Add Token: Typography" })
+        .click();
+
+      await expect(tokensUpdateCreateModal).toBeVisible();
+
+      const nameField = tokensUpdateCreateModal.getByLabel("Name");
+      await nameField.fill("typography.empty");
+
+      const valueField = tokensUpdateCreateModal.getByLabel("Font Size");
+
+      // Insert a value and then delete it
+      await valueField.fill("1");
+      await valueField.fill("");
+
+      // Submit button should be disabled when field is empty
+      const submitButton = tokensUpdateCreateModal.getByRole("button", {
+        name: "Save",
+      });
+      await expect(submitButton).toBeDisabled();
+
+      // Switch to reference tab, should not be submittable either
+      const referenceTabButton =
+        tokensUpdateCreateModal.getByTestId("reference-opt");
+      await referenceTabButton.click();
+      await expect(submitButton).toBeDisabled();
+    });
+
+    test("User adds typography token with reference", async ({ page }) => {
+      const { tokensUpdateCreateModal, tokenThemesSetsSidebar, tokensSidebar } =
+        await setupTypographyTokensFile(page);
+
+      const newTokenTitle = "NewReference";
+
+      const tokensTabPanel = page.getByRole("tabpanel", { name: "tokens" });
+      await tokensTabPanel
+        .getByRole("button", { name: "Add Token: Typography" })
+        .click();
+
+      await expect(tokensUpdateCreateModal).toBeVisible();
+
+      const nameField = tokensUpdateCreateModal.getByLabel("Name");
+      await nameField.fill(newTokenTitle);
+
+      const referenceTabButton =
+        tokensUpdateCreateModal.getByTestId("reference-opt");
+      referenceTabButton.click();
+
+      const referenceField = tokensUpdateCreateModal.getByLabel("Reference");
+      await referenceField.fill("{Full}");
+
+      const submitButton = tokensUpdateCreateModal.getByRole("button", {
+        name: "Save",
+      });
+
+      const resolvedValue =
+        await tokensUpdateCreateModal.getByText("Resolved value:");
+      await expect(resolvedValue).toBeVisible();
+      await expect(resolvedValue).toContainText("Font Family: 42dot Sans");
+      await expect(resolvedValue).toContainText("Font Size: 100");
+      await expect(resolvedValue).toContainText("Font Weight: 300");
+      await expect(resolvedValue).toContainText("Letter Spacing: 2");
+      await expect(resolvedValue).toContainText("Text Case: uppercase");
+      await expect(resolvedValue).toContainText("Text Decoration: underline");
+
+      await expect(submitButton).toBeEnabled();
+      await submitButton.click();
+
+      await expect(tokensUpdateCreateModal).not.toBeVisible();
+
+      const newToken = tokensSidebar.getByRole("button", {
+        name: newTokenTitle,
+      });
+      await expect(newToken).toBeVisible();
     });
   });
 });

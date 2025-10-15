@@ -7,6 +7,7 @@
 (ns app.common.logic.shapes
   (:require
    [app.common.data :as d]
+   [app.common.data.macros :as dm]
    [app.common.files.changes-builder :as pcb]
    [app.common.files.helpers :as cfh]
    [app.common.geom.shapes :as gsh]
@@ -16,16 +17,17 @@
    [app.common.types.pages-list :as ctpl]
    [app.common.types.shape.interactions :as ctsi]
    [app.common.types.shape.layout :as ctl]
+   [app.common.types.shape.token :as ctst]
    [app.common.types.text :as ctt]
    [app.common.types.token :as cto]
    [app.common.uuid :as uuid]
    [clojure.set :as set]))
 
-(def text-typography-attrs (set ctt/text-typography-attrs))
+(def text-typography-style-attrs (set ctt/text-typography-attrs))
 
 (defn- generate-unapply-tokens
   "When updating attributes that have a token applied, we must unapply it, because the value
-   of the attribute now has been given directly, and does not come from the token.
+  of the attribute now has been given directly, and does not come from the token.
   When applying a typography asset style we also unapply any typographic tokens."
   [changes objects changed-sub-attr]
   (let [new-objects     (pcb/get-objects changes)
@@ -35,33 +37,42 @@
         text-changed-attrs
         (fn [shape]
           (let [new-shape (get new-objects (:id shape))
-                attrs (ctt/get-diff-attrs (:content shape) (:content new-shape))
-                ;; Unapply token when applying typography asset style
-                attrs (if (set/intersection text-typography-attrs attrs)
-                        (into attrs cto/typography-keys)
-                        attrs)]
+                attrs     (ctt/get-diff-attrs (:content shape) (:content new-shape))
+
+                attrs     (cond-> attrs
+                            ;; Unapply token when applying typography asset style
+                            (seq (set/intersection text-typography-style-attrs attrs))
+                            (into cto/typography-keys)
+
+                            ;; Unapply font-weight when changing the font-family attribute
+                            (and (:font-id attrs) (ctst/font-weight-applied? shape))
+                            (conj :font-weight))]
             (apply set/union (map cto/shape-attr->token-attrs attrs))))
 
-        check-attr (fn [shape changes attr]
-                     (let [tokens      (get shape :applied-tokens {})
-                           token-attrs (if (or (not= (:type shape) :text) (not= attr :content))
-                                         (cto/shape-attr->token-attrs attr changed-sub-attr)
-                                         (text-changed-attrs shape))]
-                       (if (some #(contains? tokens %) token-attrs)
-                         (pcb/update-shapes changes [(:id shape)] #(cto/unapply-token-id % token-attrs))
-                         changes)))
+        check-attr
+        (fn [shape changes attr]
+          (let [shape-id    (dm/get-prop shape :id)
+                tokens      (get shape :applied-tokens {})
+                token-attrs (if (and (cfh/text-shape? shape) (= attr :content))
+                              (text-changed-attrs shape)
+                              (cto/shape-attr->token-attrs attr changed-sub-attr))]
 
-        check-shape (fn [changes mod-obj-change]
-                      (let [shape (get objects (:id mod-obj-change))
-                            xf (comp (filter #(= (:type %) :set))
-                                     (map :attr))
-                            attrs (into [] xf (:operations mod-obj-change))]
-                        (reduce (partial check-attr shape)
-                                changes
-                                attrs)))]
-    (reduce check-shape
-            changes
-            mod-obj-changes)))
+            (if (some #(contains? tokens %) token-attrs)
+              (pcb/update-shapes changes [shape-id] #(cto/unapply-token-id % token-attrs))
+              changes)))
+
+        check-shape
+        (fn [changes mod-obj-change]
+          (let [shape (get objects (:id mod-obj-change))
+                attrs (into []
+                            (comp (filter #(= (:type %) :set))
+                                  (map :attr))
+                            (:operations mod-obj-change))]
+            (reduce (partial check-attr shape)
+                    changes
+                    attrs)))]
+
+    (reduce check-shape changes mod-obj-changes)))
 
 (defn generate-update-shapes
   [changes ids update-fn objects {:keys [attrs changed-sub-attr ignore-tree ignore-touched with-objects?]}]
@@ -174,15 +185,17 @@
                            interactions)))
                  (vals objects))
 
+         id-to-delete? (set ids-to-delete)
          changes
-         (reduce (fn [changes {:keys [id] :as flow}]
-                   (if (contains? ids-to-delete (:starting-frame flow))
-                     (-> changes
-                         (pcb/with-page page)
-                         (pcb/set-flow id nil))
-                     changes))
-                 changes
-                 (:flows page))
+         (->> (:flows page)
+              (reduce
+               (fn [changes [id flow]]
+                 (if (id-to-delete? (:starting-frame flow))
+                   (-> changes
+                       (pcb/with-page page)
+                       (pcb/set-flow id nil))
+                   changes))
+               changes))
 
 
          all-parents
@@ -394,9 +407,10 @@
                             (remove #(= % parent-id) all-parents))]
 
     (-> changes
-        ;; Remove layout-item properties when moving a shape outside a layout
+        ;; Remove layout-item properties and tokens when moving a shape outside a layout
         (cond-> (not (ctl/any-layout? parent))
-          (pcb/update-shapes ids ctl/remove-layout-item-data))
+          (-> (pcb/update-shapes ids ctl/remove-layout-item-data)
+              (pcb/update-shapes ids cto/unapply-layout-item-tokens)))
 
         ;; Remove the hide in viewer flag
         (cond-> (and (not= uuid/zero parent-id) (cfh/frame-shape? parent))

@@ -10,11 +10,11 @@
    ["react-dom/server" :as rds]
    [app.common.data :as d :refer [not-empty?]]
    [app.common.data.macros :as dm]
-   [app.common.geom.matrix :as gmt]
-   [app.common.geom.point :as gpt]
+   [app.common.math :as mth]
    [app.common.types.fills :as types.fills]
    [app.common.types.fills.impl :as types.fills.impl]
    [app.common.types.path :as path]
+   [app.common.types.path.impl :as path.impl]
    [app.common.types.shape.layout :as ctl]
    [app.common.uuid :as uuid]
    [app.config :as cf]
@@ -26,6 +26,7 @@
    [app.render-wasm.deserializers :as dr]
    [app.render-wasm.helpers :as h]
    [app.render-wasm.mem :as mem]
+   [app.render-wasm.mem.heap32 :as mem.h32]
    [app.render-wasm.performance :as perf]
    [app.render-wasm.serializers :as sr]
    [app.render-wasm.serializers.color :as sr-clr]
@@ -38,39 +39,20 @@
    [promesa.core :as p]
    [rumext.v2 :as mf]))
 
-;; (defonce internal-frame-id nil)
-;; (defonce wasm/internal-module #js {})
-(defonce use-dpr? (contains? cf/flags :render-wasm-dpr))
+(def use-dpr? (contains? cf/flags :render-wasm-dpr))
 
-;;
-;; List of common entry sizes.
-;;
-;; All of these entries are in bytes so we need to adjust
-;; these values to work with TypedArrays of 32 bits.
-;;
-(def CHILD-ENTRY-SIZE 16)
-(def MODIFIER-ENTRY-SIZE 40)
-(def MODIFIER-ENTRY-TRANSFORM-OFFSET 16)
-(def GRID-LAYOUT-ROW-ENTRY-SIZE 5)
-(def GRID-LAYOUT-COLUMN-ENTRY-SIZE 5)
-(def GRID-LAYOUT-CELL-ENTRY-SIZE 37)
+(def ^:const UUID-U8-SIZE 16)
+(def ^:const UUID-U32-SIZE (/ UUID-U8-SIZE 4))
 
-(defn modifier-get-entries-size
-  "Returns the list of a modifier list in bytes"
-  [modifiers]
-  (mem/get-list-size modifiers MODIFIER-ENTRY-SIZE))
+(def ^:const MODIFIER-U8-SIZE 40)
+(def ^:const MODIFIER-U32-SIZE (/ MODIFIER-U8-SIZE 4))
+(def ^:const MODIFIER-TRANSFORM-U8-OFFSET-SIZE 16)
 
-(defn grid-layout-get-row-entries-size
-  [rows]
-  (mem/get-list-size rows GRID-LAYOUT-ROW-ENTRY-SIZE))
+(def ^:const GRID-LAYOUT-ROW-U8-SIZE 8)
+(def ^:const GRID-LAYOUT-COLUMN-U8-SIZE 8)
+(def ^:const GRID-LAYOUT-CELL-U8-SIZE 36)
 
-(defn grid-layout-get-column-entries-size
-  [columns]
-  (mem/get-list-size columns GRID-LAYOUT-COLUMN-ENTRY-SIZE))
-
-(defn grid-layout-get-cell-entries-size
-  [cells]
-  (mem/get-list-size cells GRID-LAYOUT-CELL-ENTRY-SIZE))
+(def ^:const MAX_BUFFER_CHUNK_SIZE (* 256 1024))
 
 (def dpr
   (if use-dpr? (if (exists? js/window) js/window.devicePixelRatio 1.0) 1.0))
@@ -100,7 +82,10 @@
 (defn- render
   [timestamp]
   (h/call wasm/internal-module "_render" timestamp)
-  (set! wasm/internal-frame-id nil))
+  (set! wasm/internal-frame-id nil)
+  ;; emit custom event
+  (let [event (js/CustomEvent. "wasm:render")]
+    (js/document.dispatchEvent ^js event)))
 
 (def debounce-render (fns/debounce render 100))
 
@@ -169,31 +154,29 @@
   (h/call wasm/internal-module "_set_shape_rotation" rotation))
 
 (defn set-shape-children
-  [shape-ids]
-  (let [num-shapes (count shape-ids)]
-    (perf/begin-measure "set-shape-children")
-    (when (> num-shapes 0)
-      (let [offset (mem/alloc-bytes (* CHILD-ENTRY-SIZE num-shapes))
-            heap (mem/get-heap-u32)]
+  [children]
+  (perf/begin-measure "set-shape-children")
+  (when-not ^boolean (empty? children)
+    (let [heap   (mem/get-heap-u32)
+          size   (mem/get-alloc-size children UUID-U8-SIZE)
+          offset (mem/alloc->offset-32 size)]
+      (reduce (fn [offset id]
+                (mem.h32/write-uuid offset heap id))
+              offset
+              children)))
 
-        (loop [entries (seq shape-ids)
-               current-offset  offset]
-          (when-not (empty? entries)
-            (let [id (first entries)]
-              (sr/heapu32-set-uuid id heap (mem/ptr8->ptr32 current-offset))
-              (recur (rest entries) (+ current-offset CHILD-ENTRY-SIZE)))))))
+  (let [result (h/call wasm/internal-module "_set_children")]
+    (perf/end-measure "set-shape-children")
+    result))
 
-    (let [result (h/call wasm/internal-module "_set_children")]
-      (perf/end-measure "set-shape-children")
-      result)))
+(defn- get-string-length
+  [string]
+  (+ (count string) 1))
 
-(defn- get-string-length [string] (+ (count string) 1))
 
 (defn- fetch-image
   [shape-id image-id]
-  (let [buffer-shape-id (uuid/get-u32 shape-id)
-        buffer-image-id (uuid/get-u32 image-id)
-        url             (cf/resolve-file-media {:id image-id})]
+  (let [url   (cf/resolve-file-media {:id image-id})]
     {:key url
      :callback #(->> (http/send! {:method :get
                                   :uri url
@@ -201,23 +184,32 @@
                      (rx/map :body)
                      (rx/mapcat wapi/read-file-as-array-buffer)
                      (rx/map (fn [image]
-                               ;; FIXME use bigger heap ptr size if it
-                               ;; is possible (if image size modulo
-                               ;; permits it)
-                               (let [size    (.-byteLength image)
-                                     offset  (mem/alloc-bytes size)
-                                     heap    (mem/get-heap-u8)
-                                     data    (js/Uint8Array. image)]
-                                 (.set heap data offset)
-                                 (h/call wasm/internal-module "_store_image"
-                                         (aget buffer-shape-id 0)
-                                         (aget buffer-shape-id 1)
-                                         (aget buffer-shape-id 2)
-                                         (aget buffer-shape-id 3)
-                                         (aget buffer-image-id 0)
-                                         (aget buffer-image-id 1)
-                                         (aget buffer-image-id 2)
-                                         (aget buffer-image-id 3))
+                               (let [size        (.-byteLength image)
+                                     padded-size (if (zero? (mod size 4)) size (+ size (- 4 (mod size 4))))
+                                     total-bytes (+ 32 padded-size) ; UUID size + padded size
+                                     offset      (mem/alloc->offset-32 total-bytes)
+                                     heap32      (mem/get-heap-u32)
+                                     data        (js/Uint8Array. image)
+                                     padded      (js/Uint8Array. padded-size)]
+
+                                 ;; 1. Set shape id
+                                 (mem.h32/write-uuid offset heap32 shape-id)
+
+                                 ;; 2. Set image id
+                                 (mem.h32/write-uuid (+ offset 4) heap32 image-id)
+
+                                 ;; 3. Adjust padding on image data
+                                 (.set padded data)
+                                 (when (< size padded-size)
+                                   (dotimes [i (- padded-size size)]
+                                     (aset padded (+ size i) 0)))
+
+                                 ;; 4. Set image data
+                                 (let [u32view (js/Uint32Array. (.-buffer padded))
+                                       image-u32-offset (+ offset 8)]
+                                   (.set heap32 u32view image-u32-offset))
+
+                                 (h/call wasm/internal-module "_store_image")
                                  true))))}))
 
 (defn- get-fill-images
@@ -227,7 +219,7 @@
 (defn- process-fill-image
   [shape-id fill]
   (when-let [image (:fill-image fill)]
-    (let [id (dm/get-prop image :id)
+    (let [id (get image :id)
           buffer (uuid/get-u32 id)
           cached-image? (h/call wasm/internal-module "_is_image_cached"
                                 (aget buffer 0)
@@ -252,7 +244,7 @@
   (if (empty? fills)
     (h/call wasm/internal-module "_clear_shape_fills")
     (let [fills  (types.fills/coerce fills)
-          offset (mem/alloc-bytes-32 (types.fills/get-byte-size fills))
+          offset (mem/alloc->offset-32 (types.fills/get-byte-size fills))
           heap   (mem/get-heap-u32)]
 
       ;; write fills to the heap
@@ -287,7 +279,7 @@
                 style     (-> stroke :stroke-style sr/translate-stroke-style)
                 cap-start (-> stroke :stroke-cap-start sr/translate-stroke-cap)
                 cap-end   (-> stroke :stroke-cap-end sr/translate-stroke-cap)
-                offset    (mem/alloc-bytes types.fills.impl/FILL-BYTE-SIZE)
+                offset    (mem/alloc types.fills.impl/FILL-U8-SIZE)
                 heap      (mem/get-heap-u8)
                 dview     (js/DataView. (.-buffer heap))]
             (case align
@@ -302,7 +294,7 @@
                 (h/call wasm/internal-module "_add_shape_stroke_fill"))
 
               (some? image)
-              (let [image-id      (dm/get-prop image :id)
+              (let [image-id      (get image :id)
                     buffer        (uuid/get-u32 image-id)
                     cached-image? (h/call wasm/internal-module "_is_image_cached" (aget buffer 0) (aget buffer 1) (aget buffer 2) (aget buffer 3))]
                 (types.fills.impl/write-image-fill offset dview opacity image)
@@ -324,24 +316,36 @@
                   (merge style))
         str   (sr/serialize-path-attrs attrs)
         size  (count str)
-        offset   (mem/alloc-bytes size)]
+        offset   (mem/alloc size)]
     (h/call wasm/internal-module "stringToUTF8" str offset size)
     (h/call wasm/internal-module "_set_shape_path_attrs" (count attrs))))
 
-;; FIXME: revisit on heap refactor is merged to use u32 instead u8
 (defn set-shape-path-content
+  "Upload path content in chunks to WASM."
   [content]
-  (let [pdata  (path/content content)
-        size   (path/get-byte-size content)
-        offset (mem/alloc-bytes size)
-        heap   (mem/get-heap-u8)]
-    (path/write-to pdata (.-buffer heap) offset)
-    (h/call wasm/internal-module "_set_shape_path_content")))
+  (let [chunk-size (quot MAX_BUFFER_CHUNK_SIZE 4)
+        buffer-size (path/get-byte-size content)
+        padded-size (* 4 (mth/ceil (/ buffer-size 4)))
+        buffer (js/Uint8Array. padded-size)]
+    (path/write-to content (.-buffer buffer) 0)
+    (h/call wasm/internal-module "_start_shape_path_buffer")
+    (let [heapu32 (mem/get-heap-u32)]
+      (loop [offset 0]
+        (when (< offset padded-size)
+          (let [end (min padded-size (+ offset (* chunk-size 4)))
+                chunk (.subarray buffer offset end)
+                chunk-u32 (js/Uint32Array. chunk.buffer chunk.byteOffset (quot (.-length chunk) 4))
+                offset-size (.-length chunk-u32)
+                heap-offset (mem/alloc->offset-32 (* 4 offset-size))]
+            (.set heapu32 chunk-u32 heap-offset)
+            (h/call wasm/internal-module "_set_shape_path_chunk_buffer")
+            (recur end)))))
+    (h/call wasm/internal-module "_set_shape_path_buffer")))
 
 (defn set-shape-svg-raw-content
   [content]
   (let [size (get-string-length content)
-        offset (mem/alloc-bytes size)]
+        offset (mem/alloc size)]
     (h/call wasm/internal-module "stringToUTF8" content offset size)
     (h/call wasm/internal-module "_set_shape_svg_raw_content")))
 
@@ -353,7 +357,7 @@
 
 (defn set-shape-vertical-align
   [vertical-align]
-  (h/call wasm/internal-module "_set_shape_vertical_align" (sr/serialize-vertical-align vertical-align)))
+  (h/call wasm/internal-module "_set_shape_vertical_align" (sr/translate-vertical-align vertical-align)))
 
 (defn set-shape-opacity
   [opacity]
@@ -369,6 +373,12 @@
   (when constraint
     (h/call wasm/internal-module "_set_shape_constraint_v" (sr/translate-constraint-v constraint))))
 
+(defn set-shape-constraints
+  [constraint-h constraint-v]
+  (h/call wasm/internal-module "_clear_shape_constraints")
+  (set-constraints-h constraint-h)
+  (set-constraints-v constraint-v))
+
 (defn set-shape-hidden
   [hidden]
   (h/call wasm/internal-module "_set_shape_hidden" hidden))
@@ -377,45 +387,40 @@
   [bool-type]
   (h/call wasm/internal-module "_set_shape_bool_type" (sr/translate-bool-type bool-type)))
 
-(defn- translate-blur-type
-  [blur-type]
-  (case blur-type
-    :layer-blur 1
-    0))
-
 (defn set-shape-blur
   [blur]
-  (let [type   (-> blur :type sr/translate-blur-type)
-        hidden (:hidden blur)
-        value  (:value blur)]
-    (h/call wasm/internal-module "_set_shape_blur" type hidden value)))
+  (if (some? blur)
+    (let [type   (-> blur :type sr/translate-blur-type)
+          hidden (:hidden blur)
+          value  (:value blur)]
+      (h/call wasm/internal-module "_set_shape_blur" type hidden value))
+    (h/call wasm/internal-module "_clear_shape_blur")))
 
 (defn set-shape-corners
   [corners]
-  (let [r1 (or (get corners 0) 0)
-        r2 (or (get corners 1) 0)
-        r3 (or (get corners 2) 0)
-        r4 (or (get corners 3) 0)]
+  (let [[r1 r2 r3 r4] (map #(d/nilv % 0) corners)]
     (h/call wasm/internal-module "_set_shape_corners" r1 r2 r3 r4)))
 
 (defn set-flex-layout
   [shape]
-  (let [dir (-> (or (dm/get-prop shape :layout-flex-dir) :row) sr/translate-layout-flex-dir)
-        gap (dm/get-prop shape :layout-gap)
-        row-gap (or (dm/get-prop gap :row-gap) 0)
-        column-gap (or (dm/get-prop gap :column-gap) 0)
+  (let [dir        (-> (get shape :layout-flex-dir :row)
+                       (sr/translate-layout-flex-dir))
+        gap        (get shape :layout-gap)
+        row-gap    (get gap :row-gap 0)
+        column-gap (get gap :column-gap 0)
 
-        align-items (-> (or (dm/get-prop shape :layout-align-items) :start) sr/translate-layout-align-items)
-        align-content (-> (or (dm/get-prop shape :layout-align-content) :stretch) sr/translate-layout-align-content)
-        justify-items (-> (or (dm/get-prop shape :layout-justify-items) :start) sr/translate-layout-justify-items)
-        justify-content (-> (or (dm/get-prop shape :layout-justify-content) :stretch) sr/translate-layout-justify-content)
-        wrap-type (-> (or (dm/get-prop shape :layout-wrap-type) :nowrap) sr/translate-layout-wrap-type)
+        align-items     (-> (get shape :layout-align-items) sr/translate-layout-align-items)
+        align-content   (-> (get shape :layout-align-content) sr/translate-layout-align-content)
+        justify-items   (-> (get shape :layout-justify-items) sr/translate-layout-justify-items)
+        justify-content (-> (get shape :layout-justify-content) sr/translate-layout-justify-content)
+        wrap-type       (-> (get shape :layout-wrap-type) sr/translate-layout-wrap-type)
 
-        padding (dm/get-prop shape :layout-padding)
-        padding-top (or (dm/get-prop padding :p1) 0)
-        padding-right (or (dm/get-prop padding :p2) 0)
-        padding-bottom (or (dm/get-prop padding :p3) 0)
-        padding-left (or (dm/get-prop padding :p4) 0)]
+        padding         (get shape :layout-padding)
+        padding-top     (get padding :p1 0)
+        padding-right   (get padding :p2 0)
+        padding-bottom  (get padding :p3 0)
+        padding-left    (get padding :p4 0)]
+
     (h/call wasm/internal-module
             "_set_flex_layout_data"
             dir
@@ -433,21 +438,22 @@
 
 (defn set-grid-layout-data
   [shape]
-  (let [dir (-> (or (dm/get-prop shape :layout-grid-dir) :row) sr/translate-layout-grid-dir)
-        gap (dm/get-prop shape :layout-gap)
-        row-gap (or (dm/get-prop gap :row-gap) 0)
-        column-gap (or (dm/get-prop gap :column-gap) 0)
+  (let [dir        (-> (get shape :layout-grid-dir :row)
+                       (sr/translate-layout-grid-dir))
+        gap        (get shape :layout-gap)
+        row-gap    (get gap :row-gap 0)
+        column-gap (get gap :column-gap 0)
 
-        align-items (-> (or (dm/get-prop shape :layout-align-items) :start) sr/translate-layout-align-items)
-        align-content (-> (or (dm/get-prop shape :layout-align-content) :stretch) sr/translate-layout-align-content)
-        justify-items (-> (or (dm/get-prop shape :layout-justify-items) :start) sr/translate-layout-justify-items)
-        justify-content (-> (or (dm/get-prop shape :layout-justify-content) :stretch) sr/translate-layout-justify-content)
+        align-items     (-> (get shape :layout-align-items) sr/translate-layout-align-items)
+        align-content   (-> (get shape :layout-align-content) sr/translate-layout-align-content)
+        justify-items   (-> (get shape :layout-justify-items) sr/translate-layout-justify-items)
+        justify-content (-> (get shape :layout-justify-content) sr/translate-layout-justify-content)
 
-        padding (dm/get-prop shape :layout-padding)
-        padding-top (or (dm/get-prop padding :p1) 0)
-        padding-right (or (dm/get-prop padding :p2) 0)
-        padding-bottom (or (dm/get-prop padding :p3) 0)
-        padding-left (or (dm/get-prop padding :p4) 0)]
+        padding         (get shape :layout-padding)
+        padding-top     (get padding :p1 0)
+        padding-right   (get padding :p2 0)
+        padding-bottom  (get padding :p3 0)
+        padding-left    (get padding :p4 0)]
 
     (h/call wasm/internal-module
             "_set_grid_layout_data"
@@ -465,125 +471,96 @@
 
 (defn set-grid-layout-rows
   [entries]
-  (let [size (grid-layout-get-row-entries-size entries)
-        offset (mem/alloc-bytes size)
+  (let [size    (mem/get-alloc-size entries GRID-LAYOUT-ROW-U8-SIZE)
+        offset  (mem/alloc size)
+        dview   (mem/get-data-view)]
 
-        heap
-        (js/Uint8Array.
-         (.-buffer (mem/get-heap-u8))
-         offset
-         size)]
-    (loop [entries (seq entries)
-           current-offset  0]
-      (when-not (empty? entries)
-        (let [{:keys [type value]} (first entries)]
-          (.set heap (sr/u8 (sr/translate-grid-track-type type)) (+ current-offset 0))
-          (.set heap (sr/f32->u8 value) (+ current-offset 1))
-          (recur (rest entries) (+ current-offset GRID-LAYOUT-ROW-ENTRY-SIZE)))))
+    (reduce (fn [offset {:keys [type value]}]
+              (-> offset
+                  (mem/write-u8 dview (sr/translate-grid-track-type type))
+                  (+ 3) ;; padding
+                  (mem/write-f32 dview value)
+                  (mem/assert-written offset GRID-LAYOUT-ROW-U8-SIZE)))
+
+            offset
+            entries)
+
     (h/call wasm/internal-module "_set_grid_rows")))
 
 (defn set-grid-layout-columns
   [entries]
-  (let [size (grid-layout-get-column-entries-size entries)
-        offset (mem/alloc-bytes size)
+  (let [size   (mem/get-alloc-size entries GRID-LAYOUT-COLUMN-U8-SIZE)
+        offset (mem/alloc size)
+        dview  (mem/get-data-view)]
 
-        heap
-        (js/Uint8Array.
-         (.-buffer (mem/get-heap-u8))
-         offset
-         size)]
-    (loop [entries (seq entries)
-           current-offset  0]
-      (when-not (empty? entries)
-        (let [{:keys [type value]} (first entries)]
-          (.set heap (sr/u8 (sr/translate-grid-track-type type)) (+ current-offset 0))
-          (.set heap (sr/f32->u8 value) (+ current-offset 1))
-          (recur (rest entries) (+ current-offset GRID-LAYOUT-COLUMN-ENTRY-SIZE)))))
+    (reduce (fn [offset {:keys [type value]}]
+              (-> offset
+                  (mem/write-u8 dview (sr/translate-grid-track-type type))
+                  (+ 3) ;; padding
+                  (mem/write-f32 dview value)
+                  (mem/assert-written offset GRID-LAYOUT-COLUMN-U8-SIZE)))
+            offset
+            entries)
+
     (h/call wasm/internal-module "_set_grid_columns")))
 
 (defn set-grid-layout-cells
   [cells]
-  (let [entries (vals cells)
-        size (grid-layout-get-cell-entries-size entries)
-        offset (mem/alloc-bytes size)
+  (let [size    (mem/get-alloc-size cells GRID-LAYOUT-CELL-U8-SIZE)
+        offset  (mem/alloc size)
+        dview   (mem/get-data-view)]
 
-        heap
-        (js/Uint8Array.
-         (.-buffer (mem/get-heap-u8))
-         offset
-         size)]
+    (reduce-kv (fn [offset _ cell]
+                 (let [shape-id  (-> (get cell :shapes) first)]
+                   (-> offset
+                       (mem/write-i32 dview (get cell :row))
+                       (mem/write-i32 dview (get cell :row-span))
+                       (mem/write-i32 dview (get cell :column))
+                       (mem/write-i32 dview (get cell :column-span))
 
-    (loop [entries (seq entries)
-           current-offset  0]
-      (when-not (empty? entries)
-        (let [cell (first entries)]
+                       (mem/write-u8 dview (sr/translate-align-self (get cell :align-self)))
+                       (mem/write-u8 dview (sr/translate-justify-self (get cell :justify-self)))
 
-          ;; row: [u8; 4],
-          (.set heap (sr/i32->u8 (:row cell)) (+ current-offset 0))
+                       ;; padding
+                       (+ 2)
 
-          ;; row_span: [u8; 4],
-          (.set heap (sr/i32->u8 (:row-span cell)) (+ current-offset 4))
+                       (mem/write-uuid dview (d/nilv shape-id uuid/zero))
+                       (mem/assert-written offset GRID-LAYOUT-CELL-U8-SIZE))))
 
-          ;; column: [u8; 4],
-          (.set heap (sr/i32->u8 (:column cell)) (+ current-offset 8))
-
-          ;; column_span: [u8; 4],
-          (.set heap (sr/i32->u8 (:column-span cell)) (+ current-offset 12))
-
-          ;; has_align_self: u8,
-          (.set heap (sr/bool->u8 (some? (:align-self cell))) (+ current-offset 16))
-
-          ;; align_self: u8,
-          (.set heap (sr/u8 (sr/translate-align-self (:align-self cell))) (+ current-offset 17))
-
-          ;; has_justify_self: u8,
-          (.set heap (sr/bool->u8 (some? (:justify-self cell))) (+ current-offset 18))
-
-          ;; justify_self: u8,
-          (.set heap (sr/u8 (sr/translate-justify-self (:justify-self cell))) (+ current-offset 19))
-
-          ;; has_shape_id: u8,
-          (.set heap (sr/bool->u8 (d/not-empty? (:shapes cell))) (+ current-offset 20))
-
-          ;; shape_id_a: [u8; 4],
-          ;; shape_id_b: [u8; 4],
-          ;; shape_id_c: [u8; 4],
-          ;; shape_id_d: [u8; 4],
-          (.set heap (sr/uuid->u8 (or (-> cell :shapes first) uuid/zero)) (+ current-offset 21))
-
-          (recur (rest entries) (+ current-offset GRID-LAYOUT-CELL-ENTRY-SIZE)))))
+               offset
+               cells)
 
     (h/call wasm/internal-module "_set_grid_cells")))
 
 (defn set-grid-layout
   [shape]
   (set-grid-layout-data shape)
-  (set-grid-layout-rows (:layout-grid-rows shape))
-  (set-grid-layout-columns (:layout-grid-columns shape))
-  (set-grid-layout-cells (:layout-grid-cells shape)))
+  (set-grid-layout-rows (get shape :layout-grid-rows))
+  (set-grid-layout-columns (get shape :layout-grid-columns))
+  (set-grid-layout-cells (get shape :layout-grid-cells)))
 
 (defn set-layout-child
   [shape]
-  (let [margins (dm/get-prop shape :layout-item-margin)
-        margin-top (or (dm/get-prop margins :m1) 0)
-        margin-right (or (dm/get-prop margins :m2) 0)
-        margin-bottom (or (dm/get-prop margins :m3) 0)
-        margin-left (or (dm/get-prop margins :m4) 0)
+  (let [margins       (get shape :layout-item-margin)
+        margin-top    (get margins :m1 0)
+        margin-right  (get margins :m2 0)
+        margin-bottom (get margins :m3 0)
+        margin-left   (get margins :m4 0)
 
-        h-sizing (-> (dm/get-prop shape :layout-item-h-sizing) (or :fix) sr/translate-layout-sizing)
-        v-sizing (-> (dm/get-prop shape :layout-item-v-sizing) (or :fix) sr/translate-layout-sizing)
-        align-self (-> (dm/get-prop shape :layout-item-align-self) sr/translate-align-self)
+        h-sizing      (-> (get shape :layout-item-h-sizing) sr/translate-layout-sizing)
+        v-sizing      (-> (get shape :layout-item-v-sizing) sr/translate-layout-sizing)
+        align-self    (-> (get shape :layout-item-align-self) sr/translate-align-self)
 
-        max-h (dm/get-prop shape :layout-item-max-h)
-        has-max-h (some? max-h)
-        min-h (dm/get-prop shape :layout-item-min-h)
-        has-min-h (some? min-h)
-        max-w (dm/get-prop shape :layout-item-max-w)
-        has-max-w (some? max-w)
-        min-w (dm/get-prop shape :layout-item-min-w)
-        has-min-w (some? min-w)
-        is-absolute (boolean (dm/get-prop shape :layout-item-absolute))
-        z-index (-> (dm/get-prop shape :layout-item-z-index) (or 0))]
+        max-h         (get shape :layout-item-max-h)
+        has-max-h     (some? max-h)
+        min-h         (get shape :layout-item-min-h)
+        has-min-h     (some? min-h)
+        max-w         (get shape :layout-item-max-w)
+        has-max-w     (some? max-w)
+        min-w         (get shape :layout-item-min-w)
+        has-min-w     (some? min-w)
+        is-absolute   (boolean (get shape :layout-item-absolute))
+        z-index       (get shape :layout-item-z-index)]
     (h/call wasm/internal-module
             "_set_layout_child_data"
             margin-top
@@ -593,65 +570,103 @@
             h-sizing
             v-sizing
             has-max-h
-            (or max-h 0)
+            (d/nilv max-h 0)
             has-min-h
-            (or min-h 0)
+            (d/nilv min-h 0)
             has-max-w
-            (or max-w 0)
+            (d/nilv max-w 0)
             has-min-w
-            (or min-w 0)
-            (some? align-self)
-            (or align-self 0)
+            (d/nilv min-w 0)
+
+            (d/nilv align-self 0)
             is-absolute
-            z-index)))
+            (d/nilv z-index))))
+
+(defn clear-layout
+  []
+  (h/call wasm/internal-module "_clear_shape_layout"))
+
+(defn- set-shape-layout
+  [shape objects]
+  (clear-layout)
+
+  (when (or (ctl/any-layout? shape)
+            (ctl/any-layout-immediate-child? objects shape))
+    (set-layout-child shape))
+
+  (when (ctl/flex-layout? shape)
+    (set-flex-layout shape))
+
+  (when (ctl/grid-layout? shape)
+    (set-grid-layout shape)))
 
 (defn set-shape-shadows
   [shadows]
   (h/call wasm/internal-module "_clear_shape_shadows")
-  (let [total-shadows (count shadows)]
-    (loop [index 0]
-      (when (< index total-shadows)
-        (let [shadow (nth shadows index)
-              color (dm/get-prop shadow :color)
-              blur (dm/get-prop shadow :blur)
-              rgba (sr-clr/hex->u32argb (dm/get-prop color :color) (dm/get-prop color :opacity))
-              hidden (dm/get-prop shadow :hidden)
-              x (dm/get-prop shadow :offset-x)
-              y (dm/get-prop shadow :offset-y)
-              spread (dm/get-prop shadow :spread)
-              style (dm/get-prop shadow :style)]
-          (h/call wasm/internal-module "_add_shape_shadow" rgba blur spread x y (sr/translate-shadow-style style) hidden)
-          (recur (inc index)))))))
 
-(declare propagate-apply)
+  (run! (fn [shadow]
+          (let [color  (get shadow :color)
+                blur   (get shadow :blur)
+                rgba   (sr-clr/hex->u32argb (get color :color)
+                                            (get color :opacity))
+                hidden (get shadow :hidden)
+                x      (get shadow :offset-x)
+                y      (get shadow :offset-y)
+                spread (get shadow :spread)
+                style  (get shadow :style)]
+            (h/call wasm/internal-module "_add_shape_shadow"
+                    rgba
+                    blur
+                    spread
+                    x
+                    y
+                    (sr/translate-shadow-style style)
+                    hidden)))
+        shadows))
 
 (defn set-shape-text-content
+  "This function sets shape text content and returns a stream that loads the needed fonts asynchronously"
   [shape-id content]
+
   (h/call wasm/internal-module "_clear_shape_text")
-  (set-shape-vertical-align (dm/get-prop content :vertical-align))
 
-  (let [paragraph-set (first (dm/get-prop content :children))
-        paragraphs (dm/get-prop paragraph-set :children)
-        fonts (fonts/get-content-fonts content)
-        emoji? (atom false)
-        languages (atom #{})]
-    (loop [index 0]
-      (when (< index (count paragraphs))
+  (set-shape-vertical-align (get content :vertical-align))
+
+  (let [paragraph-set (first (get content :children))
+        paragraphs    (get paragraph-set :children)
+        fonts         (fonts/get-content-fonts content)
+        total         (count paragraphs)]
+
+    (loop [index  0
+           emoji? false
+           langs  #{}]
+
+      (if (< index total)
         (let [paragraph (nth paragraphs index)
-              leaves (dm/get-prop paragraph :children)]
-          (when (seq leaves)
-            (let [text (apply str (map :text leaves))]
-              (when (and (not @emoji?) (t/contains-emoji? text))
-                (reset! emoji? true))
-              (swap! languages into (t/get-languages text))
-              (t/write-shape-text leaves paragraph text))
-            (recur (inc index))))))
+              leaves    (get paragraph :children)]
+          (if (empty? (seq leaves))
+            (recur (inc index)
+                   emoji?
+                   langs)
 
-    (let [updated-fonts
-          (-> fonts
-              (cond-> @emoji? (f/add-emoji-font))
-              (f/add-noto-fonts @languages))]
-      (f/store-fonts shape-id updated-fonts))))
+            (let [text   (apply str (map :text leaves))
+                  emoji? (if emoji? emoji? (t/contains-emoji? text))
+                  langs  (t/collect-used-languages langs text)]
+
+              (t/write-shape-text leaves paragraph text)
+              (recur (inc index)
+                     emoji?
+                     langs))))
+
+        (let [updated-fonts
+              (-> fonts
+                  (cond-> ^boolean emoji? (f/add-emoji-font))
+                  (f/add-noto-fonts langs))
+              result (f/store-fonts shape-id updated-fonts)]
+
+          (h/call wasm/internal-module "_update_shape_text_layout")
+
+          result)))))
 
 (defn set-shape-text
   [shape-id content]
@@ -663,17 +678,18 @@
   [grow-type]
   (h/call wasm/internal-module "_set_shape_grow_type" (sr/translate-grow-type grow-type)))
 
-(defn text-dimensions
+(defn get-text-dimensions
   ([id]
    (use-shape id)
-   (text-dimensions))
+   (get-text-dimensions))
   ([]
-   (let [offset (h/call wasm/internal-module "_get_text_dimensions")
-         heapf32 (mem/get-heap-f32)
-         width (aget heapf32 (mem/ptr8->ptr32 offset))
-         height (aget heapf32 (mem/ptr8->ptr32 (+ offset 4)))
-         max-width (aget heapf32 (mem/ptr8->ptr32 (+ offset 8)))]
-     (h/call wasm/internal-module "_free_bytes")
+   (let [offset    (-> (h/call wasm/internal-module "_get_text_dimensions")
+                       (mem/->offset-32))
+         heapf32   (mem/get-heap-f32)
+         width     (aget heapf32 (+ offset 0))
+         height    (aget heapf32 (+ offset 1))
+         max-width (aget heapf32 (+ offset 2))]
+     (mem/free)
      {:width width :height height :max-width max-width})))
 
 (defn set-view-box
@@ -692,54 +708,54 @@
   [objects shape]
   (perf/begin-measure "set-object")
   (let [id           (dm/get-prop shape :id)
-        parent-id    (dm/get-prop shape :parent-id)
         type         (dm/get-prop shape :type)
-        masked       (dm/get-prop shape :masked-group)
-        selrect      (dm/get-prop shape :selrect)
-        constraint-h (dm/get-prop shape :constraints-h)
-        constraint-v (dm/get-prop shape :constraints-v)
+
+        parent-id    (get shape :parent-id)
+        masked       (get shape :masked-group)
+        selrect      (get shape :selrect)
+        constraint-h (get shape :constraints-h)
+        constraint-v (get shape :constraints-v)
         clip-content (if (= type :frame)
-                       (not (dm/get-prop shape :show-content))
+                       (not (get shape :show-content))
                        false)
-        rotation     (dm/get-prop shape :rotation)
-        transform    (dm/get-prop shape :transform)
+        rotation     (get shape :rotation)
+        transform    (get shape :transform)
 
         ;; Groups from imported SVG's can have their own fills
-        fills        (dm/get-prop shape :fills)
+        fills        (get shape :fills)
 
         strokes      (if (= type :group)
-                       [] (dm/get-prop shape :strokes))
-        children     (dm/get-prop shape :shapes)
-        blend-mode   (dm/get-prop shape :blend-mode)
-        opacity      (dm/get-prop shape :opacity)
-        hidden       (dm/get-prop shape :hidden)
-        content      (dm/get-prop shape :content)
-        grow-type    (dm/get-prop shape :grow-type)
-        blur         (dm/get-prop shape :blur)
-        corners      (when (some? (dm/get-prop shape :r1))
-                       [(dm/get-prop shape :r1)
-                        (dm/get-prop shape :r2)
-                        (dm/get-prop shape :r3)
-                        (dm/get-prop shape :r4)])
-        svg-attrs    (dm/get-prop shape :svg-attrs)
-        shadows      (dm/get-prop shape :shadow)]
+                       [] (get shape :strokes))
+        children     (get shape :shapes)
+        blend-mode   (get shape :blend-mode)
+        opacity      (get shape :opacity)
+        hidden       (get shape :hidden)
+        content      (get shape :content)
+        bool-type    (get shape :bool-type)
+        grow-type    (get shape :grow-type)
+        blur         (get shape :blur)
+        svg-attrs    (get shape :svg-attrs)
+        shadows      (get shape :shadow)
+        corners      (map #(get shape %) [:r1 :r2 :r3 :r4])]
 
     (use-shape id)
     (set-parent-id parent-id)
     (set-shape-type type)
     (set-shape-clip-content clip-content)
-    (set-constraints-h constraint-h)
-    (set-constraints-v constraint-v)
+    (set-shape-constraints constraint-h constraint-v)
+
     (set-shape-rotation rotation)
     (set-shape-transform transform)
     (set-shape-blend-mode blend-mode)
     (set-shape-opacity opacity)
     (set-shape-hidden hidden)
     (set-shape-children children)
+    (set-shape-corners corners)
+    (set-shape-blur blur)
     (when (and (= type :group) masked)
       (set-masked masked))
-    (when (some? blur)
-      (set-shape-blur blur))
+    (when (= type :bool)
+      (set-shape-bool-type bool-type))
     (when (and (some? content)
                (or (= type :path)
                    (= type :bool)))
@@ -748,20 +764,11 @@
       (set-shape-path-content content))
     (when (and (some? content) (= type :svg-raw))
       (set-shape-svg-raw-content (get-static-markup shape)))
-    (when (some? corners) (set-shape-corners corners))
     (when (some? shadows) (set-shape-shadows shadows))
     (when (= type :text)
       (set-shape-grow-type grow-type))
 
-    (when (or (ctl/any-layout? shape)
-              (ctl/any-layout-immediate-child? objects shape))
-      (set-layout-child shape))
-
-    (when (ctl/flex-layout? shape)
-      (set-flex-layout shape))
-
-    (when (ctl/grid-layout? shape)
-      (set-grid-layout shape))
+    (set-shape-layout shape objects)
 
     (set-shape-selrect selrect)
 
@@ -771,7 +778,6 @@
                             (set-shape-strokes id strokes)))]
       (perf/end-measure "set-object")
       pending)))
-
 
 (defn process-pending
   [pending]
@@ -785,6 +791,7 @@
            (rx/subs! (fn [_]
                        (clear-drawing-cache)
                        (request-render "pending-finished")
+                       (h/call wasm/internal-module "_update_shape_text_layout_for_all")
                        (.dispatchEvent ^js js/document event))))
       (do
         (clear-drawing-cache)
@@ -819,133 +826,90 @@
 
 (defn set-focus-mode
   [entries]
-  (let [offset (mem/alloc-bytes-32 (* (count entries) 16))
-        heapu32 (mem/get-heap-u32)]
+  (when-not ^boolean (empty? entries)
+    (let [size   (mem/get-alloc-size entries UUID-U8-SIZE)
+          heap   (mem/get-heap-u32)
+          offset (mem/alloc->offset-32 size)]
 
-    (loop [entries (seq entries)
-           current-offset  offset]
-      (when-not (empty? entries)
-        (let [id (first entries)]
-          (sr/heapu32-set-uuid id heapu32 current-offset)
-          (recur (rest entries) (+ current-offset (mem/ptr8->ptr32 16))))))
+      (reduce (fn [offset id]
+                (mem.h32/write-uuid offset heap id))
+              offset
+              entries)
 
-    (h/call wasm/internal-module "_set_focus_mode")
-    (clear-drawing-cache)
-    (request-render "set-focus-mode")))
+      (h/call wasm/internal-module "_set_focus_mode")
+      (clear-drawing-cache)
+      (request-render "set-focus-mode"))))
 
 (defn set-structure-modifiers
   [entries]
-  (when-not (empty? entries)
-    (let [offset (mem/alloc-bytes-32 (mem/get-list-size entries 44))
+  (when-not ^boolean (empty? entries)
+    (let [size    (mem/get-alloc-size entries 44)
+          offset  (mem/alloc->offset-32 size)
           heapu32 (mem/get-heap-u32)
           heapf32 (mem/get-heap-f32)]
-      (loop [entries (seq entries)
-             current-offset  offset]
-        (when-not (empty? entries)
-          (let [{:keys [type parent id index value] :as entry} (first entries)]
-            (sr/heapu32-set-u32 (sr/translate-structure-modifier-type type) heapu32 (+ current-offset 0))
-            (sr/heapu32-set-u32 (or index 0) heapu32 (+ current-offset 1))
-            (sr/heapu32-set-uuid parent heapu32 (+ current-offset 2))
-            (sr/heapu32-set-uuid id heapu32 (+ current-offset 6))
-            (aset heapf32 (+ current-offset 10) value)
-            (recur (rest entries) (+ current-offset 11)))))
+
+
+      (reduce (fn [offset {:keys [type parent id index value]}]
+                (-> offset
+                    (mem.h32/write-u32 heapu32 (sr/translate-structure-modifier-type type))
+                    (mem.h32/write-u32 heapu32 (d/nilv index 0))
+                    (mem.h32/write-uuid heapu32 parent)
+                    (mem.h32/write-uuid heapu32 id)
+                    (mem.h32/write-f32 heapf32 value)))
+              offset
+              entries)
+
       (h/call wasm/internal-module "_set_structure_modifiers"))))
 
 (defn propagate-modifiers
   [entries pixel-precision]
-  (when (d/not-empty? entries)
-    (let [offset (mem/alloc-bytes-32 (modifier-get-entries-size entries))
-          heapf32 (mem/get-heap-f32)
-          heapu32 (mem/get-heap-u32)]
+  (when-not ^boolean (empty? entries)
+    (let [heapf32 (mem/get-heap-f32)
+          heapu32 (mem/get-heap-u32)
+          size    (mem/get-alloc-size entries MODIFIER-U8-SIZE)
+          offset  (mem/alloc->offset-32 size)]
 
-      (loop [entries (seq entries)
-             current-offset  offset]
-        (when-not (empty? entries)
-          (let [{:keys [id transform]} (first entries)]
-            (sr/heapu32-set-uuid id heapu32 current-offset)
-            (sr/heapf32-set-matrix transform heapf32 (+ current-offset (mem/ptr8->ptr32 MODIFIER-ENTRY-TRANSFORM-OFFSET)))
-            (recur (rest entries) (+ current-offset (mem/ptr8->ptr32 MODIFIER-ENTRY-SIZE))))))
+      (reduce (fn [offset [id transform]]
+                (-> offset
+                    (mem.h32/write-uuid heapu32 id)
+                    (mem.h32/write-matrix heapf32 transform)))
+              offset
+              entries)
 
-      (let [result-offset (h/call wasm/internal-module "_propagate_modifiers" pixel-precision)
-            heapf32 (mem/get-heap-f32)
-            heapu32 (mem/get-heap-u32)
-            len (aget heapu32 (mem/ptr8->ptr32 result-offset))
-            result
-            (->> (range 0 len)
-                 (mapv #(dr/heap32->entry heapu32 heapf32 (mem/ptr8->ptr32 (+ result-offset 4 (* % MODIFIER-ENTRY-SIZE))))))]
-        (h/call wasm/internal-module "_free_bytes")
+      (let [offset     (-> (h/call wasm/internal-module "_propagate_modifiers" pixel-precision)
+                           (mem/->offset-32))
+            length     (aget heapu32 offset)
+            max-offset (+ offset 1 (* length MODIFIER-U32-SIZE))
+            result     (loop [result (transient [])
+                              offset (inc offset)]
+                         (if (< offset max-offset)
+                           (let [entry (dr/read-modifier-entry heapu32 heapf32 offset)]
+                             (recur (conj! result entry)
+                                    (+ offset MODIFIER-U32-SIZE)))
+                           (persistent! result)))]
 
+        (mem/free)
         result))))
-
-(defn propagate-apply
-  [entries pixel-precision]
-  (when (d/not-empty? entries)
-    (let [offset (mem/alloc-bytes-32 (modifier-get-entries-size entries))
-          heapf32 (mem/get-heap-f32)
-          heapu32 (mem/get-heap-u32)]
-
-      (loop [entries (seq entries)
-             current-offset  offset]
-        (when-not (empty? entries)
-          (let [{:keys [id transform]} (first entries)]
-            (sr/heapu32-set-uuid id heapu32 current-offset)
-            (sr/heapf32-set-matrix transform heapf32 (+ current-offset (mem/ptr8->ptr32 MODIFIER-ENTRY-TRANSFORM-OFFSET)))
-            (recur (rest entries) (+ current-offset (mem/ptr8->ptr32 MODIFIER-ENTRY-SIZE))))))
-
-      (let [offset (h/call wasm/internal-module "_propagate_apply" pixel-precision)
-            heapf32 (mem/get-heap-f32)
-            width (aget heapf32 (mem/ptr8->ptr32 (+ offset 0)))
-            height (aget heapf32 (mem/ptr8->ptr32 (+ offset 4)))
-            cx (aget heapf32 (mem/ptr8->ptr32 (+ offset 8)))
-            cy (aget heapf32 (mem/ptr8->ptr32 (+ offset 12)))
-
-            a (aget heapf32 (mem/ptr8->ptr32 (+ offset 16)))
-            b (aget heapf32 (mem/ptr8->ptr32 (+ offset 20)))
-            c (aget heapf32 (mem/ptr8->ptr32 (+ offset 24)))
-            d (aget heapf32 (mem/ptr8->ptr32 (+ offset 28)))
-            e (aget heapf32 (mem/ptr8->ptr32 (+ offset 32)))
-            f (aget heapf32 (mem/ptr8->ptr32 (+ offset 36)))
-            transform (gmt/matrix a b c d e f)]
-
-        (h/call wasm/internal-module "_free_bytes")
-        (request-render "set-modifiers")
-
-        {:width width
-         :height height
-         :center (gpt/point cx cy)
-         :transform transform}))))
 
 (defn get-selection-rect
   [entries]
-  (when (d/not-empty? entries)
-    (let [offset (mem/alloc-bytes-32 (* (count entries) 16))
-          heapu32 (mem/get-heap-u32)]
 
-      (loop [entries (seq entries)
-             current-offset  offset]
-        (when-not (empty? entries)
-          (let [id (first entries)]
-            (sr/heapu32-set-uuid id heapu32 current-offset)
-            (recur (rest entries) (+ current-offset (mem/ptr8->ptr32 16))))))
+  (when-not ^boolean (empty? entries)
+    (let [size    (mem/get-alloc-size entries UUID-U8-SIZE)
+          offset  (mem/alloc->offset-32 size)
+          heapu32 (mem/get-heap-u32)
+          heapf32 (mem/get-heap-f32)]
 
-      (let [offset (h/call wasm/internal-module "_get_selection_rect")
-            heapf32 (mem/get-heap-f32)
-            width (aget heapf32 (mem/ptr8->ptr32 (+ offset 0)))
-            height (aget heapf32 (mem/ptr8->ptr32 (+ offset 4)))
-            cx (aget heapf32 (mem/ptr8->ptr32 (+ offset 8)))
-            cy (aget heapf32 (mem/ptr8->ptr32 (+ offset 12)))
-            a (aget heapf32 (mem/ptr8->ptr32 (+ offset 16)))
-            b (aget heapf32 (mem/ptr8->ptr32 (+ offset 20)))
-            c (aget heapf32 (mem/ptr8->ptr32 (+ offset 24)))
-            d (aget heapf32 (mem/ptr8->ptr32 (+ offset 28)))
-            e (aget heapf32 (mem/ptr8->ptr32 (+ offset 32)))
-            f (aget heapf32 (mem/ptr8->ptr32 (+ offset 36)))
-            transform (gmt/matrix a b c d e f)]
-        (h/call wasm/internal-module "_free_bytes")
-        {:width width
-         :height height
-         :center (gpt/point cx cy)
-         :transform transform}))))
+      (reduce (fn [offset id]
+                (mem.h32/write-uuid offset heapu32 id))
+              offset
+              entries)
+
+      (let [offset (-> (h/call wasm/internal-module "_get_selection_rect")
+                       (mem/->offset-32))
+            result (dr/read-selection-rect heapf32 offset)]
+        (mem/free)
+        result))))
 
 (defn set-canvas-background
   [background]
@@ -959,22 +923,26 @@
 
 (defn set-modifiers
   [modifiers]
-  (when-not (empty? modifiers)
-    (let [offset (mem/alloc-bytes-32 (* MODIFIER-ENTRY-SIZE (count modifiers)))
-          heapu32 (mem/get-heap-u32)
-          heapf32 (mem/get-heap-f32)]
 
-      (loop [entries (seq modifiers)
-             current-offset  offset]
-        (when-not (empty? entries)
-          (let [{:keys [id transform]} (first entries)]
-            (sr/heapu32-set-uuid id heapu32 current-offset)
-            (sr/heapf32-set-matrix transform heapf32 (+ current-offset (mem/ptr8->ptr32 MODIFIER-ENTRY-TRANSFORM-OFFSET)))
-            (recur (rest entries) (+ current-offset (mem/ptr8->ptr32 MODIFIER-ENTRY-SIZE))))))
+  ;; We need to ensure efficient operations
+  (assert (vector? modifiers) "expected a vector for `set-modifiers`")
 
-      (h/call wasm/internal-module "_set_modifiers")
+  (let [length (count modifiers)]
+    (when (pos? length)
+      (let [offset  (mem/alloc->offset-32 (* MODIFIER-U8-SIZE length))
+            heapu32 (mem/get-heap-u32)
+            heapf32 (mem/get-heap-f32)]
 
-      (request-render "set-modifiers"))))
+        (reduce (fn [offset [id transform]]
+                  (-> offset
+                      (mem.h32/write-uuid heapu32 id)
+                      (mem.h32/write-matrix heapf32 transform)))
+                offset
+                modifiers)
+
+        (h/call wasm/internal-module "_set_modifiers")
+
+        (request-render "set-modifiers")))))
 
 (defn initialize
   [base-objects zoom vbox background]
@@ -986,7 +954,7 @@
     (h/call wasm/internal-module "_init_shapes_pool" total-shapes)
     (set-objects base-objects)))
 
-(def ^:private canvas-options
+(def ^:private context-options
   #js {:antialias false
        :depth true
        :stencil true
@@ -1003,23 +971,30 @@
     (dbg/enabled? :wasm-viewbox)
     (bit-or 2r00000000000000000000000000000001)))
 
-(defn assign-canvas
+(defn set-canvas-size
+  [canvas]
+  (set! (.-width canvas) (* dpr (.-clientWidth ^js canvas)))
+  (set! (.-height canvas) (* dpr (.-clientHeight ^js canvas))))
+
+(defn init-canvas-context
   [canvas]
   (let [gl      (unchecked-get wasm/internal-module "GL")
         flags   (debug-flags)
-        context (.getContext ^js canvas "webgl2" canvas-options)
-        ;; Register the context with emscripten
-        handle  (.registerContext ^js gl context #js {"majorVersion" 2})]
-    (.makeContextCurrent ^js gl handle)
+        context-id (if (dbg/enabled? :wasm-gl-context-init-error) "fail" "webgl2")
+        context (.getContext ^js canvas context-id context-options)
+        context-init? (not (nil? context))]
+    (when-not (nil? context)
+      (let [handle (.registerContext ^js gl context #js {"majorVersion" 2})]
+        (.makeContextCurrent ^js gl handle)
 
-    ;; Force the WEBGL_debug_renderer_info extension as emscripten does not enable it
-    (.getExtension context "WEBGL_debug_renderer_info")
+        ;; Force the WEBGL_debug_renderer_info extension as emscripten does not enable it
+        (.getExtension context "WEBGL_debug_renderer_info")
 
-    ;; Initialize Wasm Render Engine
-    (h/call wasm/internal-module "_init" (/ (.-width ^js canvas) dpr) (/ (.-height ^js canvas) dpr))
-    (h/call wasm/internal-module "_set_render_options" flags dpr))
-  (set! (.-width canvas) (* dpr (.-clientWidth ^js canvas)))
-  (set! (.-height canvas) (* dpr (.-clientHeight ^js canvas))))
+        ;; Initialize Wasm Render Engine
+        (h/call wasm/internal-module "_init" (/ (.-width ^js canvas) dpr) (/ (.-height ^js canvas) dpr))
+        (h/call wasm/internal-module "_set_render_options" flags dpr)))
+    (set-canvas-size canvas)
+    context-init?))
 
 (defn clear-canvas
   []
@@ -1048,10 +1023,50 @@
                         (get position :x)
                         (get position :y))
         heapi32 (mem/get-heap-i32)
-        row     (aget heapi32 (mem/ptr8->ptr32 (+ offset 0)))
-        column  (aget heapi32 (mem/ptr8->ptr32 (+ offset 4)))]
-    (h/call wasm/internal-module "_free_bytes")
+        row     (aget heapi32 (mem/->offset-32 (+ offset 0)))
+        column  (aget heapi32 (mem/->offset-32 (+ offset 4)))]
+    (mem/free)
     [row column]))
+
+(defn shape-to-path
+  [id]
+  (use-shape id)
+  (let [offset (-> (h/call wasm/internal-module "_current_to_path")
+                   (mem/->offset-32))
+        heap   (mem/get-heap-u32)
+        length (aget heap offset)
+        data   (mem/slice heap
+                          (+ offset 1)
+                          (* length path.impl/SEGMENT-U32-SIZE))
+        content (path/from-bytes data)]
+    (mem/free)
+    content))
+
+(defn- calculate-bool*
+  [bool-type]
+  (-> (h/call wasm/internal-module "_calculate_bool" (sr/translate-bool-type bool-type))
+      (mem/->offset-32)))
+
+(defn calculate-bool
+  [bool-type ids]
+
+  (let [size   (mem/get-alloc-size ids UUID-U8-SIZE)
+        heap   (mem/get-heap-u32)
+        offset (mem/alloc->offset-32 size)]
+
+    (reduce (fn [offset id]
+              (mem.h32/write-uuid offset heap id))
+            offset
+            (rseq ids))
+
+    (let [offset  (calculate-bool* bool-type)
+          length  (aget heap offset)
+          data    (mem/slice heap
+                             (+ offset 1)
+                             (* length path.impl/SEGMENT-U32-SIZE))
+          content (path/from-bytes data)]
+      (mem/free)
+      content)))
 
 (defonce module
   (delay
@@ -1059,10 +1074,40 @@
       (let [uri (cf/resolve-static-asset "js/render_wasm.js")]
         (->> (js/dynamicImport (str uri))
              (p/mcat (fn [module]
-                       (let [default (unchecked-get module "default")]
+                       (let [default (unchecked-get module "default")
+                             serializers #js{:blur-type (unchecked-get module "RawBlurType")
+                                             :blend-mode (unchecked-get module "RawBlendMode")
+                                             :bool-type (unchecked-get module "RawBoolType")
+                                             :font-style (unchecked-get module "RawFontStyle")
+                                             :flex-direction (unchecked-get module "RawFlexDirection")
+                                             :grid-direction (unchecked-get module "RawGridDirection")
+                                             :grow-type (unchecked-get module "RawGrowType")
+                                             :align-items (unchecked-get module "RawAlignItems")
+                                             :align-self (unchecked-get module "RawAlignSelf")
+                                             :align-content (unchecked-get module "RawAlignContent")
+                                             :justify-items (unchecked-get module "RawJustifyItems")
+                                             :justify-content (unchecked-get module "RawJustifyContent")
+                                             :justify-self (unchecked-get module "RawJustifySelf")
+                                             :wrap-type (unchecked-get module "RawWrapType")
+                                             :grid-track-type (unchecked-get module "RawGridTrackType")
+                                             :shadow-style (unchecked-get module "RawShadowStyle")
+                                             :stroke-style (unchecked-get module "RawStrokeStyle")
+                                             :stroke-cap (unchecked-get module "RawStrokeCap")
+                                             :shape-type (unchecked-get module "RawShapeType")
+                                             :constraint-h (unchecked-get module "RawConstraintH")
+                                             :constraint-v (unchecked-get module "RawConstraintV")
+                                             :sizing (unchecked-get module "RawSizing")
+                                             :vertical-align (unchecked-get module "RawVerticalAlign")
+                                             :fill-data (unchecked-get module "RawFillData")
+                                             :text-align (unchecked-get module "RawTextAlign")
+                                             :text-direction (unchecked-get module "RawTextDirection")
+                                             :text-decoration (unchecked-get module "RawTextDecoration")
+                                             :text-transform (unchecked-get module "RawTextTransform")
+                                             :segment-data (unchecked-get module "RawSegmentData")}]
+                         (set! wasm/serializers serializers)
                          (default))))
-             (p/fmap (fn [module]
-                       (set! wasm/internal-module module)
+             (p/fmap (fn [default]
+                       (set! wasm/internal-module default)
                        true))
              (p/merr (fn [cause]
                        (js/console.error cause)

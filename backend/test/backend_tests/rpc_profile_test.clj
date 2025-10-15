@@ -6,6 +6,7 @@
 
 (ns backend-tests.rpc-profile-test
   (:require
+   [app.common.time :as ct]
    [app.common.uuid :as uuid]
    [app.config :as cf]
    [app.db :as db]
@@ -14,7 +15,6 @@
    [app.rpc :as-alias rpc]
    [app.rpc.commands.profile :as profile]
    [app.tokens :as tokens]
-   [app.util.time :as dt]
    [backend-tests.helpers :as th]
    [clojure.java.io :as io]
    [clojure.test :as t]
@@ -158,11 +158,11 @@
     (let [row (th/db-get :team
                          {:id (:default-team-id prof)}
                          {::db/remove-deleted false})]
-      (t/is (dt/instant? (:deleted-at row))))
+      (t/is (ct/inst? (:deleted-at row))))
 
     ;; execute permanent deletion task
     (let [result (th/run-task! :objects-gc {:min-age 0})]
-      (t/is (= 4 (:processed result))))
+      (t/is (= 6 (:processed result))))
 
     (let [row (th/db-get :team
                          {:id (:default-team-id prof)}
@@ -212,7 +212,7 @@
         ;; (th/print-result! out)
 
         (let [team (th/db-get :team {:id (:id team1)} {::db/remove-deleted false})]
-          (t/is (dt/instant? (:deleted-at team)))))
+          (t/is (ct/inst? (:deleted-at team)))))
 
       ;; Request profile to be deleted
       (let [params {::th/type :delete-profile
@@ -324,7 +324,7 @@
 
     ;; execute permanent deletion task
     (let [result (th/run-task! :objects-gc {:min-age 0})]
-      (t/is (= 4 (:processed result))))
+      (t/is (= 6 (:processed result))))
 
     (let [row (th/db-get :team
                          {:id (:default-team-id prof1)}
@@ -363,7 +363,7 @@
 
     ;; execute permanent deletion task
     (let [result (th/run-task! :objects-gc {:min-age 0})]
-      (t/is (= 8 (:processed result))))))
+      (t/is (= 10 (:processed result))))))
 
 
 (t/deftest email-blacklist-1
@@ -514,10 +514,9 @@
           (t/is (= 0 (:call-count @mock))))))))
 
 (t/deftest prepare-and-register-with-invitation-and-enabled-registration-1
-  (let [sprops (:app.setup/props th/*system*)
-        itoken (tokens/generate sprops
+  (let [itoken (tokens/generate th/*system*
                                 {:iss :team-invitation
-                                 :exp (dt/in-future "48h")
+                                 :exp (ct/in-future "48h")
                                  :role :editor
                                  :team-id uuid/zero
                                  :member-email "user@example.com"})
@@ -543,10 +542,9 @@
       (t/is (string? (:invitation-token result))))))
 
 (t/deftest prepare-and-register-with-invitation-and-enabled-registration-2
-  (let [sprops (:app.setup/props th/*system*)
-        itoken (tokens/generate sprops
+  (let [itoken (tokens/generate th/*system*
                                 {:iss :team-invitation
-                                 :exp (dt/in-future "48h")
+                                 :exp (ct/in-future "48h")
                                  :role :editor
                                  :team-id uuid/zero
                                  :member-email "user2@example.com"})
@@ -565,10 +563,9 @@
 
 (t/deftest prepare-and-register-with-invitation-and-disabled-registration-1
   (with-redefs [app.config/flags [:disable-registration]]
-    (let [sprops (:app.setup/props th/*system*)
-          itoken (tokens/generate sprops
+    (let [itoken (tokens/generate th/*system*
                                   {:iss :team-invitation
-                                   :exp (dt/in-future "48h")
+                                   :exp (ct/in-future "48h")
                                    :role :editor
                                    :team-id uuid/zero
                                    :member-email "user@example.com"})
@@ -586,10 +583,9 @@
 
 (t/deftest prepare-and-register-with-invitation-and-disabled-registration-2
   (with-redefs [app.config/flags [:disable-registration]]
-    (let [sprops (:app.setup/props th/*system*)
-          itoken (tokens/generate sprops
+    (let [itoken (tokens/generate th/*system*
                                   {:iss :team-invitation
-                                   :exp (dt/in-future "48h")
+                                   :exp (ct/in-future "48h")
                                    :role :editor
                                    :team-id uuid/zero
                                    :member-email "user2@example.com"})
@@ -608,10 +604,9 @@
 
 (t/deftest prepare-and-register-with-invitation-and-disabled-login-with-password
   (with-redefs [app.config/flags [:disable-login-with-password]]
-    (let [sprops (:app.setup/props th/*system*)
-          itoken (tokens/generate sprops
+    (let [itoken (tokens/generate th/*system*
                                   {:iss :team-invitation
-                                   :exp (dt/in-future "48h")
+                                   :exp (ct/in-future "48h")
                                    :role :editor
                                    :team-id uuid/zero
                                    :member-email "user2@example.com"})

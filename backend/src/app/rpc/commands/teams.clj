@@ -11,7 +11,8 @@
    [app.common.exceptions :as ex]
    [app.common.features :as cfeat]
    [app.common.schema :as sm]
-   [app.common.types.team :as tt]
+   [app.common.time :as ct]
+   [app.common.types.team :as types.team]
    [app.common.uuid :as uuid]
    [app.config :as cf]
    [app.db :as db]
@@ -30,7 +31,6 @@
    [app.setup :as-alias setup]
    [app.storage :as sto]
    [app.util.services :as sv]
-   [app.util.time :as dt]
    [app.worker :as wrk]
    [clojure.set :as set]))
 
@@ -443,13 +443,18 @@
    [:team-id ::sm/uuid]])
 
 (def sql:team-invitations
-  "select email_to as email, role, (valid_until < now()) as expired
-   from team_invitation where team_id = ? order by valid_until desc, created_at desc")
+  "SELECT email_to AS email,
+          role,
+          (valid_until < ?::timestamptz) AS expired
+     FROM team_invitation
+    WHERE team_id = ?
+    ORDER BY valid_until DESC, created_at DESC")
 
 (defn get-team-invitations
   [conn team-id]
-  (->> (db/exec! conn [sql:team-invitations team-id])
-       (mapv #(update % :role keyword))))
+  (let [now (ct/now)]
+    (->> (db/exec! conn [sql:team-invitations now team-id])
+         (mapv #(update % :role keyword)))))
 
 (sv/defmethod ::get-team-invitations
   {::doc/added "1.17"
@@ -503,7 +508,7 @@
 
   (let [features (-> (cfeat/get-enabled-features cf/flags)
                      (set/difference cfeat/frontend-only-features)
-                     (cfeat/check-client-features! (:features params)))
+                     (set/difference cfeat/no-team-inheritable-features))
         params   (-> params
                      (assoc :profile-id profile-id)
                      (assoc :features features))
@@ -629,7 +634,7 @@
 
         ;; assign owner role to new profile
         (db/update! conn :team-profile-rel
-                    (get tt/permissions-for-role :owner)
+                    (get types.team/permissions-for-role :owner)
                     {:team-id id :profile-id reassign-to}))
 
       ;; and finally, if all other conditions does not match and the
@@ -666,7 +671,7 @@
 
   (let [delay (ldel/get-deletion-delay team)
         team  (db/update! conn :team
-                          {:deleted-at (dt/in-future delay)}
+                          {:deleted-at (ct/in-future delay)}
                           {:id id}
                           {::db/return-keys true})]
 
@@ -742,7 +747,7 @@
                          :team-id team-id
                          :role role})
 
-    (let [params (get tt/permissions-for-role role)]
+    (let [params (get types.team/permissions-for-role role)]
       ;; Only allow single owner on team
       (when (= role :owner)
         (db/update! conn :team-profile-rel
@@ -760,7 +765,7 @@
   [:map {:title "update-team-member-role"}
    [:team-id ::sm/uuid]
    [:member-id ::sm/uuid]
-   [:role ::tt/role]])
+   [:role types.team/schema:role]])
 
 (sv/defmethod ::update-team-member-role
   {::doc/added "1.17"
@@ -810,7 +815,7 @@
 (def ^:private schema:update-team-photo
   [:map {:title "update-team-photo"}
    [:team-id ::sm/uuid]
-   [:file ::media/upload]])
+   [:file media/schema:upload]])
 
 (sv/defmethod ::update-team-photo
   {::doc/added "1.17"

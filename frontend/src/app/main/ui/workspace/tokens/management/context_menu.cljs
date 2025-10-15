@@ -12,7 +12,6 @@
    [app.common.files.tokens :as cft]
    [app.common.types.shape.layout :as ctsl]
    [app.common.types.token :as ctt]
-   [app.common.types.tokens-lib :as ctob]
    [app.main.data.modal :as modal]
    [app.main.data.workspace.shape-layout :as dwsl]
    [app.main.data.workspace.tokens.application :as dwta]
@@ -20,7 +19,7 @@
    [app.main.refs :as refs]
    [app.main.store :as st]
    [app.main.ui.components.dropdown :refer [dropdown]]
-   [app.main.ui.ds.foundations.assets.icon :refer [icon*]]
+   [app.main.ui.ds.foundations.assets.icon :refer [icon*] :as i]
    [app.util.dom :as dom]
    [app.util.i18n :refer [tr]]
    [app.util.timers :as timers]
@@ -267,8 +266,13 @@
 (def shape-attribute-actions-map
   (let [stroke-width (partial generic-attribute-actions #{:stroke-width} "Stroke Width")
         font-size (partial generic-attribute-actions #{:font-size} "Font Size")
+        letter-spacing (partial generic-attribute-actions #{:letter-spacing} "Letter Spacing")
+        font-family (partial generic-attribute-actions #{:font-family} "Font Family")
         line-height #(generic-attribute-actions #{:line-height} "Line Height" (assoc % :on-update-shape dwta/update-line-height))
         text-case (partial generic-attribute-actions #{:text-case} "Text Case")
+        text-decoration (partial generic-attribute-actions #{:text-decoration} "Text Decoration")
+        font-weight (partial generic-attribute-actions #{:font-weight} "Font Weight")
+        typography (partial generic-attribute-actions #{:typography} "Typography")
         border-radius (partial all-or-separate-actions {:attribute-labels {:r1 "Top Left"
                                                                            :r2 "Top Right"
                                                                            :r4 "Bottom Left"
@@ -292,7 +296,13 @@
                   (when (seq line-height) line-height))))
      :stroke-width stroke-width
      :font-size font-size
+     :font-family font-family
+     :line-height line-height
+     :letter-spacing letter-spacing
      :text-case text-case
+     :text-decoration text-decoration
+     :font-weight font-weight
+     :typography typography
      :dimensions (fn [context-data]
                    (-> (concat
                         (when (seq (sizing-attribute-actions context-data)) [{:title "Sizing" :submenu :sizing}])
@@ -307,7 +317,7 @@
                         (generic-attribute-actions #{:y} "Y" (assoc context-data :on-update-shape dwta/update-shape-position)))
                        (clean-separators)))}))
 
-(defn default-actions [{:keys [token selected-token-set-name]}]
+(defn default-actions [{:keys [token selected-token-set-id]}]
   (let [{:keys [modal]} (dwta/get-token-properties token)]
     [{:title (tr "workspace.tokens.edit")
       :no-selectable true
@@ -320,7 +330,7 @@
                                              :position :right
                                              :fields fields
                                              :action "edit"
-                                             :selected-token-set-name selected-token-set-name
+                                             :selected-token-set-id selected-token-set-id
                                              :token token}))))}
      {:title (tr "workspace.tokens.duplicate")
       :no-selectable true
@@ -328,11 +338,11 @@
      {:title (tr "workspace.tokens.delete")
       :no-selectable true
       :action #(st/emit! (dwtl/delete-token
-                          (ctob/prefixed-set-path-string->set-name-string selected-token-set-name)
+                          selected-token-set-id
                           (:id token)))}]))
 
 (defn- allowed-shape-attributes [shapes]
-  (reduce into #{} (map #(ctt/shape-type->attributes (:type %)) shapes)))
+  (reduce into #{} (map #(ctt/shape-type->attributes (:type %) (:layout %)) shapes)))
 
 (defn menu-actions [{:keys [type token selected-shapes] :as context-data}]
   (let [context-data (assoc context-data :allowed-shape-attributes (allowed-shape-attributes selected-shapes))
@@ -409,12 +419,12 @@
      (when hint
        [:span {:class (stl/css :context-menu-item-hint)} hint])
      (when (not no-selectable)
-       [:> icon* {:icon-id "tick" :size "s" :class (stl/css :icon-wrapper)}])
+       [:> icon* {:icon-id i/tick :size "s" :class (stl/css :icon-wrapper)}])
      [:span {:class (stl/css :item-text)}
       title]
      (when children
        [:*
-        [:> icon* {:icon-id "arrow" :size "s"}]
+        [:> icon* {:icon-id i/arrow :size "s"}]
         [:ul {:ref submenu-ref
               :class (stl/css-case
                       :token-context-submenu true
@@ -436,7 +446,8 @@
                   (if (some? type)
                     (submenu-actions-selection-actions context-data)
                     (selection-actions context-data))
-                  (default-actions context-data))]
+                  (default-actions context-data))
+        entries (clean-separators entries)]
     (for [[index {:keys [title action selected? hint submenu no-selectable] :as entry}] (d/enumerate entries)]
       [:* {:key (dm/str title " " index)}
        (cond
@@ -461,7 +472,7 @@
         token-id (:token-id mdata)
         token (mf/deref (refs/workspace-token-in-selected-set token-id))
         token-type (:type token)
-        selected-token-set-name (mf/deref refs/selected-token-set-name)
+        selected-token-set-id (mf/deref refs/selected-token-set-id)
 
         selected-shapes
         (mf/with-memo [selected objects]
@@ -476,7 +487,7 @@
      [:& menu-tree {:submenu-offset width
                     :token token
                     :errors errors
-                    :selected-token-set-name selected-token-set-name
+                    :selected-token-set-id selected-token-set-id
                     :selected-shapes selected-shapes
                     :is-selected-inside-layout is-selected-inside-layout}]]))
 

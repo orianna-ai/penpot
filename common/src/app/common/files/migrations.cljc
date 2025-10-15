@@ -31,7 +31,9 @@
    [app.common.types.shape :as cts]
    [app.common.types.shape.interactions :as ctsi]
    [app.common.types.shape.shadow :as ctss]
+   [app.common.types.shape.text :as ctst]
    [app.common.types.text :as types.text]
+   [app.common.types.tokens-lib :as types.tokens-lib]
    [app.common.uuid :as uuid]
    [clojure.set :as set]
    [cuerdas.core :as str]))
@@ -73,7 +75,9 @@
         data
         (-> data
             (assoc :id id)
-            (dissoc :version :libs))]
+            (dissoc :version)
+            (dissoc :libs)
+            (ctf/check-file-data))]
 
     (-> file
         (assoc :data data)
@@ -230,7 +234,7 @@
               shape))
 
           (update-container [container]
-            (update container :objects d/update-vals fix-line-paths))]
+            (d/update-when container :objects d/update-vals fix-line-paths))]
 
     (-> data
         (update :pages-index d/update-vals update-container)
@@ -284,7 +288,9 @@
               (let [[deleted objects] (clean-objects objects)]
                 (if (and (pos? deleted) (< n 1000))
                   (recur (inc n) objects)
-                  (assoc container :objects objects)))))]
+                  (-> container
+                      (assoc :objects objects)
+                      (d/without-nils))))))]
 
     (-> data
         (update :pages-index d/update-vals clean-container)
@@ -382,21 +388,20 @@
                 (dissoc :fill-color :fill-opacity))))
 
           (update-container [container]
-            (if (contains? container :objects)
-              (loop [objects (:objects container)
-                     shapes  (->> (vals objects)
-                                  (filter cfh/image-shape?))]
-                (if-let [shape (first shapes)]
-                  (let [{:keys [id frame-id] :as shape'} (process-shape shape)]
-                    (if (identical? shape shape')
-                      (recur objects (rest shapes))
-                      (recur (-> objects
-                                 (assoc id shape')
-                                 (d/update-when frame-id dissoc :thumbnail))
-                             (rest shapes))))
-                  (assoc container :objects objects)))
-              container))]
-
+            (loop [objects (:objects container)
+                   shapes  (->> (vals objects)
+                                (filter cfh/image-shape?))]
+              (if-let [shape (first shapes)]
+                (let [{:keys [id frame-id] :as shape'} (process-shape shape)]
+                  (if (identical? shape shape')
+                    (recur objects (rest shapes))
+                    (recur (-> objects
+                               (assoc id shape')
+                               (d/update-when frame-id dissoc :thumbnail))
+                           (rest shapes))))
+                (-> container
+                    (assoc :objects objects)
+                    (d/without-nils)))))]
     (-> data
         (update :pages-index d/update-vals update-container)
         (d/update-when :components d/update-vals update-container))))
@@ -1432,74 +1437,6 @@
         (update :pages-index d/update-vals update-container)
         (d/update-when :components d/update-vals update-container))))
 
-(def ^:private valid-stroke?
-  (sm/lazy-validator cts/schema:stroke))
-
-(defmethod migrate-data "0007-clear-invalid-strokes-and-fills-v2"
-  [data _]
-  (letfn [(clear-color-image [image]
-            (select-keys image types.color/image-attrs))
-
-          (clear-color-gradient [gradient]
-            (select-keys gradient types.color/gradient-attrs))
-
-          (clear-stroke [stroke]
-            (-> stroke
-                (select-keys cts/stroke-attrs)
-                (d/update-when :stroke-color-gradient clear-color-gradient)
-                (d/update-when :stroke-image clear-color-image)
-                (d/update-when :stroke-style #(if (#{:svg :none} %) :solid %))))
-
-          (fix-strokes [strokes]
-            (->> (map clear-stroke strokes)
-                 (filterv valid-stroke?)))
-
-          ;; Fixes shapes with nested :fills in the :fills attribute
-          ;; introduced in a migration `0006-fix-old-texts-fills` when
-          ;; types.text/transform-nodes with identity pred was broken
-          (remove-nested-fills [[fill :as fills]]
-            (if (and (= 1 (count fills))
-                     (contains? fill :fills))
-              (:fills fill)
-              fills))
-
-          (clear-fill [fill]
-            (-> fill
-                (select-keys types.fills/fill-attrs)
-                (d/update-when :fill-image clear-color-image)
-                (d/update-when :fill-color-gradient clear-color-gradient)))
-
-          (fix-fills [fills]
-            (->> fills
-                 (remove-nested-fills)
-                 (map clear-fill)
-                 (filterv valid-fill?)))
-
-          (fix-object [object]
-            (-> object
-                (d/update-when :strokes fix-strokes)
-                (d/update-when :fills fix-fills)))
-
-          (fix-text-content [content]
-            (->> content
-                 (types.text/transform-nodes types.text/is-content-node? fix-object)
-                 (types.text/transform-nodes types.text/is-paragraph-set-node? #(dissoc % :fills))))
-
-          (update-shape [object]
-            (-> object
-                (fix-object)
-                ;; The text shape also can has strokes and fils on the
-                ;; text fragments so we need to fix them there
-                (cond-> (cfh/text-shape? object)
-                  (update :content fix-text-content))))
-
-          (update-container [container]
-            (d/update-when container :objects d/update-vals update-shape))]
-
-    (-> data
-        (update :pages-index d/update-vals update-container)
-        (d/update-when :components d/update-vals update-container))))
-
 (defmethod migrate-data "0008-fix-library-colors-v4"
   [data _]
   (letfn [(clear-color-opacity [color]
@@ -1568,6 +1505,130 @@
     (-> data
         (update :pages-index d/update-vals update-page))))
 
+(defmethod migrate-data "0011-fix-invalid-text-touched-flags"
+  [data _]
+  (letfn [(fix-shape [shape]
+            (let [touched-groups (ctk/normal-touched-groups shape)
+                  content-touched? (touched-groups :content-group)
+                  text-touched?    (or (touched-groups :text-content-text)
+                                       (touched-groups :text-content-attribute)
+                                       (touched-groups :text-content-structure))]
+              (if (and text-touched? (not content-touched?))
+                (update shape :touched ctk/set-touched-group :content-group)
+                shape)))
+
+          (update-page [page]
+            (d/update-when page :objects d/update-vals fix-shape))]
+    (-> data
+        (update :pages-index d/update-vals update-page))))
+
+(defmethod migrate-data "0012-fix-position-data"
+  [data _]
+  (let [decode-fn
+        (sm/decoder ctst/schema:position-data sm/json-transformer)
+
+        update-object
+        (fn [object]
+          (if (cfh/text-shape? object)
+            (d/update-when object :position-data decode-fn)
+            object))
+
+        update-container
+        (fn [container]
+          (d/update-when container :objects d/update-vals update-object))]
+
+    (-> data
+        (update :pages-index d/update-vals update-container)
+        (d/update-when :components d/update-vals update-container))))
+
+(defmethod migrate-data "0013-fix-component-path"
+  [data _]
+  (let [update-component
+        (fn [component]
+          (update component :path #(d/nilv % "")))]
+    (d/update-when data :components d/update-vals update-component)))
+
+(def ^:private valid-stroke?
+  (sm/lazy-validator cts/schema:stroke))
+
+(defmethod migrate-data "0013-clear-invalid-strokes-and-fills"
+  [data _]
+  (letfn [(clear-color-image [image]
+            (select-keys image types.color/image-attrs))
+
+          (clear-color-gradient [gradient]
+            (select-keys gradient types.color/gradient-attrs))
+
+          (clear-stroke [stroke]
+            (-> stroke
+                (select-keys cts/stroke-attrs)
+                (d/update-when :stroke-color-gradient clear-color-gradient)
+                (d/update-when :stroke-image clear-color-image)
+                (d/update-when :stroke-style #(if (#{:svg :none} %) :solid %))))
+
+          (fix-strokes [strokes]
+            (->> (map clear-stroke strokes)
+                 (filterv valid-stroke?)))
+
+          ;; Fixes shapes with nested :fills in the :fills attribute
+          ;; introduced in a migration `0006-fix-old-texts-fills` when
+          ;; types.text/transform-nodes with identity pred was broken
+          (remove-nested-fills [[fill :as fills]]
+            (if (and (= 1 (count fills))
+                     (contains? fill :fills))
+              (:fills fill)
+              fills))
+
+          (clear-fill [fill]
+            (-> fill
+                (select-keys types.fills/fill-attrs)
+                (d/update-when :fill-image clear-color-image)
+                (d/update-when :fill-color-gradient clear-color-gradient)))
+
+          (fix-fills [fills]
+            (->> fills
+                 (remove-nested-fills)
+                 (map clear-fill)
+                 (filterv valid-fill?)))
+
+          (fix-object [object]
+            (-> object
+                (d/update-when :strokes fix-strokes)
+                (d/update-when :fills fix-fills)))
+
+          (fix-text-content [content]
+            (->> content
+                 (types.text/transform-nodes types.text/is-content-node? fix-object)
+                 (types.text/transform-nodes types.text/is-paragraph-set-node? #(dissoc % :fills))))
+
+          (update-shape [object]
+            (-> object
+                (fix-object)
+                (d/update-when :position-data #(mapv fix-object %))
+
+                ;; The text shape can also have strokes and fills on
+                ;; the text fragments, so we need to fix them there.
+                (cond-> (cfh/text-shape? object)
+                  (update :content fix-text-content))))
+
+          (update-container [container]
+            (d/update-when container :objects d/update-vals update-shape))]
+
+    (-> data
+        (update :pages-index d/update-vals update-container)
+        (d/update-when :components d/update-vals update-container))))
+
+(defmethod migrate-data "0014-fix-tokens-lib-duplicate-ids"
+  [data _]
+  (d/update-when data :tokens-lib types.tokens-lib/fix-duplicate-token-set-ids))
+
+(defmethod migrate-data "0014-clear-components-nil-objects"
+  [data _]
+  ;; Because of a bug in migrations, several files have migrations
+  ;; applied in an incorrect order and because of other bug on old
+  ;; migrations, some files have components with `:objects` with `nil`
+  ;; as value; this migration fixes it.
+  (d/update-when data :components d/update-vals d/without-nils))
 
 (def available-migrations
   (into (d/ordered-set)
@@ -1631,8 +1692,13 @@
          "0004-clean-shadow-color"
          "0005-deprecate-image-type"
          "0006-fix-old-texts-fills"
-         "0007-clear-invalid-strokes-and-fills-v2"
          "0008-fix-library-colors-v4"
          "0009-clean-library-colors"
          "0009-add-partial-text-touched-flags"
-         "0010-fix-swap-slots-pointing-non-existent-shapes"]))
+         "0010-fix-swap-slots-pointing-non-existent-shapes"
+         "0011-fix-invalid-text-touched-flags"
+         "0012-fix-position-data"
+         "0013-fix-component-path"
+         "0013-clear-invalid-strokes-and-fills"
+         "0014-fix-tokens-lib-duplicate-ids"
+         "0014-clear-components-nil-objects"]))
